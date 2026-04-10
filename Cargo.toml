@@ -1,0 +1,8 @@
+[package]
+name = "wakuwaku"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+kanau = "0.5"
+
