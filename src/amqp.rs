@@ -1,6 +1,6 @@
 pub use amqprs::channel::ExchangeType as AmqpExchangeType;
 
-#[cfg(feature = "tracing")]
+#[cfg(feature = "tracing-otel")]
 use tracing::info;
 
 use crate::error::Error;
@@ -43,7 +43,7 @@ pub trait AmqpRouting {
 
     // Allow async fn in trait because we don't want the user to override this function
     #[allow(async_fn_in_trait)]
-    #[tracing::instrument(skip_all, err, ret)]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all, err, ret))]
     async fn ensure_exchange(pool: &AmqpPool) -> Result<(), Error> {
         let channel: Result<Pooled<Channel, _>, Error> = pool.get().await.into();
         let channel = channel?;
@@ -65,7 +65,7 @@ pub trait AmqpRouting {
 pub trait AmqpMessageSend: MessageSer + Send + Sized + AmqpRouting {
     // Allow async fn in trait because we don't want the user to override this function
     #[allow(async_fn_in_trait)]
-    #[tracing::instrument(skip_all, err, ret)]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all, err, ret))]
     /// Send message to rabbitmq
     async fn send(self, pool: &AmqpPool) -> Result<(), crate::error::Error> {
         let bytes = self.to_bytes().map_err(|e| e.into())?;
@@ -87,7 +87,7 @@ pub trait AmqpMessageSend: MessageSer + Send + Sized + AmqpRouting {
             )
             .await?;
 
-        #[cfg(feature = "tracing")]
+        #[cfg(feature = "tracing-otel")]
         info!(monotonic_counter.mq_event_push = 1);
         Ok(())
     }
@@ -101,7 +101,7 @@ pub trait AmqpMessageProcessor<Message: AmqpMessageSend + MessageDe>:
 
     // Allow async fn in trait because we don't want the user to override this function
     #[allow(async_fn_in_trait)]
-    #[tracing::instrument(skip_all, err)]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all, err))]
     /// Ensure the topology of the queue and get the channel with the queue bound
     async fn ensure_queue(pool: &AmqpPool) -> Result<Channel, crate::error::Error> {
         // ensure exchange first
@@ -142,7 +142,7 @@ impl<Message: AmqpMessageSend + MessageDe, Inner: AmqpMessageProcessor<Message>>
 
     /// Process message
     pub async fn on_message(&self, _prop: BasicProperties, content: Vec<u8>) -> Result<(), Error> {
-        #[cfg(feature = "tracing")]
+        #[cfg(feature = "tracing-otel")]
         info!(monotonic_counter.mq_event_receive = 1);
         let decoded_message = Message::from_bytes(&content).map_err(|e| e.into())?;
         self.inner.process(decoded_message).await
@@ -177,6 +177,7 @@ where
                     )
                     .await;
                 }
+                #[cfg(feature = "sqlx")]
                 Err(Error::DatabaseError(e)) => {
                     nack(
                         channel,
@@ -184,7 +185,10 @@ where
                         5,
                     )
                     .await;
+                    #[cfg(feature = "tracing")]
                     tracing::error!("Database: {}", e);
+                    #[cfg(not(feature = "tracing"))]
+                    let _ = e;
                 }
                 Err(Error::SerializeError(_)) | Err(Error::DeserializeError(_)) => {
                     ack(
@@ -194,6 +198,7 @@ where
                     )
                     .await;
                 }
+                #[cfg(feature = "redis")]
                 Err(Error::RedisError(e)) => {
                     nack(
                         channel,
@@ -201,7 +206,10 @@ where
                         5,
                     )
                     .await;
+                    #[cfg(feature = "tracing")]
                     tracing::error!("Redis: {}", e);
+                    #[cfg(not(feature = "tracing"))]
+                    let _ = e;
                 }
                 Err(Error::InvalidInput) | Err(Error::NotFound) | Err(Error::PermissionsDenied) => {
                     ack(
@@ -210,10 +218,14 @@ where
                         5,
                     )
                     .await;
+                    #[cfg(feature = "tracing")]
                     tracing::error!("Invalid input in event");
                 }
                 Err(Error::AmqpError(e)) => {
+                    #[cfg(feature = "tracing")]
                     tracing::error!("RabbitMQ: {}", e);
+                    #[cfg(not(feature = "tracing"))]
+                    let _ = e;
                 }
                 Err(Error::BusinessPanic(e)) => {
                     ack(
@@ -222,7 +234,10 @@ where
                         5,
                     )
                     .await;
+                    #[cfg(feature = "tracing")]
                     tracing::error!("Business panic: {}", e);
+                    #[cfg(not(feature = "tracing"))]
+                    let _ = e;
                 }
                 Err(Error::Io(e)) => {
                     nack(
@@ -231,7 +246,10 @@ where
                         5,
                     )
                     .await;
+                    #[cfg(feature = "tracing")]
                     tracing::error!("IO error: {}", e);
+                    #[cfg(not(feature = "tracing"))]
+                    let _ = e;
                 }
             }
         })
@@ -245,13 +263,17 @@ pub async fn ack(channel: &Channel, arg: BasicAckArguments, max_retries: u32) {
         match channel.basic_ack(arg.clone()).await {
             Ok(_) => return,
             Err(e) => {
+                #[cfg(feature = "tracing")]
                 tracing::error!("Failed to ack message: {e}");
+                #[cfg(not(feature = "tracing"))]
+                let _ = e;
                 retries += 1;
             }
         }
     }
 
     if retries == max_retries {
+        #[cfg(feature = "tracing")]
         tracing::error!("Failed to ack message after {} retries", max_retries);
     }
 }
@@ -262,7 +284,10 @@ pub async fn nack(channel: &Channel, arg: BasicNackArguments, max_retries: u32) 
         match channel.basic_nack(arg.clone()).await {
             Ok(_) => return,
             Err(e) => {
+                #[cfg(feature = "tracing")]
                 tracing::error!("Failed to nack message: {e}");
+                #[cfg(not(feature = "tracing"))]
+                let _ = e;
                 retries += 1;
             }
         }

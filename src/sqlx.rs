@@ -1,3 +1,4 @@
+#[cfg(feature = "tracing-otel")]
 use tracing::info;
 
 #[derive(Debug, Clone)]
@@ -10,6 +11,7 @@ impl DatabaseProcessor {
         Self { executor }
     }
     pub fn db(&self) -> &sqlx::PgPool {
+        #[cfg(feature = "tracing-otel")]
         info!(monotonic_counter.sql = 1);
         &self.executor
     }

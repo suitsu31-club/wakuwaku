@@ -1,5 +1,6 @@
 use kanau::message::{MessageDe, MessageSer};
 use redis::AsyncCommands;
+#[cfg(feature = "tracing")]
 use tracing::instrument;
 
 /// Type alias for redis multiplexed connection.
@@ -75,7 +76,7 @@ pub trait KeyValue: Sized + Send + Sync {
     fn new(key: Self::Key, value: Self::Value) -> Self;
 
     /// Delete value by key.
-    #[instrument(skip_all, fields(value_type = std::any::type_name::<Self>()))]
+    #[cfg_attr(feature = "tracing", instrument(skip_all, fields(value_type = std::any::type_name::<Self>())))]
     fn delete(
         conn: &mut RedisConnection,
         key: Self::Key,
@@ -93,7 +94,7 @@ where
     Self::Value: MessageDe,
 {
     /// Read value by key.
-    #[instrument(skip_all, fields(value_type = std::any::type_name::<Self>()))]
+    #[cfg_attr(feature = "tracing", instrument(skip_all, fields(value_type = std::any::type_name::<Self>())))]
     fn read(
         conn: &mut RedisConnection,
         key: Self::Key,
@@ -120,7 +121,7 @@ where
     Self::Value: Send,
 {
     /// Write current pair into redis.
-    #[instrument(skip_all, fields(value_type = std::any::type_name::<Self>()))]
+    #[cfg_attr(feature = "tracing", instrument(skip_all, fields(value_type = std::any::type_name::<Self>())))]
     fn write(
         &self,
         conn: &mut RedisConnection,
@@ -129,7 +130,7 @@ where
     }
 
     /// Write provided key and value into redis.
-    #[instrument(skip_all, fields(value_type = std::any::type_name::<Self>()))]
+    #[cfg_attr(feature = "tracing", instrument(skip_all, fields(value_type = std::any::type_name::<Self>())))]
     fn write_kv(
         conn: &mut RedisConnection,
         key: Self::Key,
@@ -144,7 +145,7 @@ where
     }
 
     /// Write current pair into redis with TTL.
-    #[instrument(skip_all, fields(value_type = std::any::type_name::<Self>()))]
+    #[cfg_attr(feature = "tracing", instrument(skip_all, fields(value_type = std::any::type_name::<Self>())))]
     fn write_with_ttl(
         &self,
         conn: &mut RedisConnection,
@@ -154,7 +155,7 @@ where
     }
 
     /// Write provided key and value into redis with TTL.
-    #[instrument(skip_all, fields(value_type = std::any::type_name::<Self>()))]
+    #[cfg_attr(feature = "tracing", instrument(skip_all, fields(value_type = std::any::type_name::<Self>())))]
     fn write_kv_with_ttl(
         conn: &mut RedisConnection,
         key: Self::Key,

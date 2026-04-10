@@ -29,4 +29,4 @@ time = "0.3"
 
 [features]
 default = ["amqprs", "sqlx", "redis", "uuid", "tracing"]
-tracing-optl = ["tracing"]
+tracing-otel = ["tracing"]
