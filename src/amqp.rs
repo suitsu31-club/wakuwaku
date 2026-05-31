@@ -17,9 +17,11 @@ use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::Arc;
 
+/// Pool of AMQP channels opened from a shared connection.
 pub type AmqpPool = crate::pool::Pool<Channel, amqprs::error::Error>;
 
 impl AmqpPool {
+    /// Build a channel pool from an existing AMQP connection.
     pub async fn connect(connection: amqprs::connection::Connection) -> Self {
         let factory = move || {
             let connection = connection.clone();
@@ -44,6 +46,7 @@ pub trait AmqpRouting {
     // Allow async fn in trait because we don't want the user to override this function
     #[allow(async_fn_in_trait)]
     #[cfg_attr(feature = "tracing", tracing::instrument(skip_all, err, ret))]
+    /// Declare the exchange used by this routing definition.
     async fn ensure_exchange(pool: &AmqpPool) -> Result<(), Error> {
         let channel: Result<Pooled<Channel, _>, Error> = pool.get().await.into();
         let channel = channel?;
@@ -97,6 +100,7 @@ pub trait AmqpMessageSend: MessageSer + Send + Sized + AmqpRouting {
 pub trait AmqpMessageProcessor<Message: AmqpMessageSend + MessageDe>:
     Processor<Message, Output = (), Error = crate::error::Error>
 {
+    /// Queue name used by this message processor.
     const QUEUE: &'static str;
 
     // Allow async fn in trait because we don't want the user to override this function
@@ -278,6 +282,7 @@ pub async fn ack(channel: &Channel, arg: BasicAckArguments, max_retries: u32) {
     }
 }
 
+/// Nack a message, retrying on transient failures up to `max_retries`.
 pub async fn nack(channel: &Channel, arg: BasicNackArguments, max_retries: u32) {
     let mut retries = 0;
     while retries < max_retries {

@@ -1,3 +1,4 @@
+/// Unified error type used across crate modules.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("{0}")]
@@ -36,9 +37,11 @@ pub enum Error {
     PermissionsDenied,
 
     #[error("Invalid input")]
+    /// Input payload or arguments are invalid.
     InvalidInput,
 
     #[error("Trying to access a resource that does not exist")]
+    /// Requested resource does not exist.
     NotFound,
 }
 

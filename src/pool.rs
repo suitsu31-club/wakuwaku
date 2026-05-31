@@ -13,6 +13,7 @@ struct PoolInner<T, FactoryError = anyhow::Error> {
     factory: ConnectionFactory<T, FactoryError>,
 }
 
+/// Bounded async pool of reusable resources created by a factory function.
 pub struct Pool<T, FactoryError = anyhow::Error> {
     inner: Arc<PoolInner<T, FactoryError>>,
 }
@@ -25,6 +26,7 @@ impl<T, FE> Clone for Pool<T, FE> {
     }
 }
 
+/// Checked-out pooled resource with automatic return-on-drop semantics.
 pub struct Pooled<T, FactoryError = anyhow::Error> {
     inner: Arc<PoolInner<T, FactoryError>>,
     permit: Option<OwnedSemaphorePermit>,
@@ -32,9 +34,11 @@ pub struct Pooled<T, FactoryError = anyhow::Error> {
 }
 
 impl<T, FE> Pooled<T, FE> {
+    /// Borrow the underlying pooled resource if it is still connected.
     pub fn get_ref(&self) -> Option<&T> {
         self.conn.as_ref()
     }
+    /// Mutably borrow the underlying pooled resource if it is still connected.
     pub fn get_mut(&mut self) -> Option<&mut T> {
         self.conn.as_mut()
     }
@@ -58,6 +62,7 @@ impl<T, FE> Drop for Pooled<T, FE> {
 }
 
 impl<T, FE> Pool<T, FE> {
+    /// Create a new pool with a resource factory and maximum capacity.
     pub fn new<F>(factory: Pin<Box<F>>, capacity: usize) -> Self
     where
         F: Fn() -> ConnectionFactoryFut<T, FE> + Send + Sync + 'static,
@@ -70,12 +75,15 @@ impl<T, FE> Pool<T, FE> {
             }),
         }
     }
+    /// Return the number of currently idle resources in the pool.
     pub fn idle_len(&self) -> usize {
         self.inner.idle.len()
     }
+    /// Create a new resource directly via the pool factory.
     pub async fn factory_create(&self) -> Result<T, FE> {
         (self.inner.factory)().await
     }
+    /// Acquire a resource from the pool, creating one if needed.
     pub async fn get(&self) -> PoolingResult<T, FE> {
         let sem = self.inner.sem.clone();
         let Ok(permit) = sem.acquire_owned().await else {
@@ -103,9 +111,13 @@ impl<T, FE> Pool<T, FE> {
     }
 }
 
+/// Result type for pool acquisition operations.
 pub enum PoolingResult<T, FE> {
+    /// Successfully acquired a pooled resource.
     Ok(Pooled<T, FE>),
+    /// Semaphore acquisition failed unexpectedly.
     SemanticsError,
+    /// Resource creation via the factory failed.
     FactoryErr(FE),
 }
 
