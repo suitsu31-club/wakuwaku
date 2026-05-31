@@ -2,6 +2,13 @@
 name = "wakuwaku"
 version = "0.1.0"
 edition = "2024"
+description = "Async backend utilities for RabbitMQ, SQLx, Redis, and pooled resources"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/suitsu31-club/wakuwaku"
+homepage = "https://github.com/suitsu31-club/wakuwaku"
+documentation = "https://docs.rs/wakuwaku"
+keywords = ["async", "rabbitmq", "redis", "sqlx", "microservice"]
 
 [dependencies]
 thiserror = "2.0"
@@ -30,3 +37,6 @@ time = "0.3"
 [features]
 default = ["amqprs", "sqlx", "redis", "uuid", "tracing"]
 tracing-otel = ["tracing"]
+
+[package.metadata.docs.rs]
+all-features = true
