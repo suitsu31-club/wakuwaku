@@ -23,5 +23,9 @@ pub mod sqlx;
 /// Redis key-value helper traits and types.
 pub mod redis;
 
+#[cfg(feature = "surreal")]
+/// SurrealDB wrapper utilities.
+pub mod surreal;
+
 /// Re-exported crate error type.
 pub use error::Error;
