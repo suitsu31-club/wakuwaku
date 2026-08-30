@@ -1,6 +1,6 @@
 [package]
 name = "wakuwaku"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 description = "Async backend utilities for RabbitMQ, SQLx, Redis, and pooled resources"
 license = "MIT"
@@ -15,7 +15,7 @@ thiserror = "2.0"
 anyhow = "1"
 kanau = { version = "0.5", features = ["message"] }
 amqprs = { version = "2.1", optional = true }
-sqlx = { version = "0.8", features = [
+sqlx = { version = "0.9", features = [
     "runtime-tokio",
     "tls-rustls",
     "postgres",
