@@ -193,7 +193,8 @@ where
                     tracing::error!("Database: {}", e);
                     #[cfg(not(feature = "tracing"))]
                     let _ = e;
-                },
+                }
+                #[cfg(feature = "surreal")]
                 Err(Error::SurrealDbError(e)) => {
                     nack(
                         channel,
@@ -205,7 +206,7 @@ where
                     tracing::error!("SurrealDB: {}", e);
                     #[cfg(not(feature = "tracing"))]
                     let _ = e;
-                },
+                }
                 Err(Error::SerializeError(_)) | Err(Error::DeserializeError(_)) => {
                     ack(
                         channel,
