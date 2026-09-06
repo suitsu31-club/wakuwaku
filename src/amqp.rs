@@ -193,7 +193,19 @@ where
                     tracing::error!("Database: {}", e);
                     #[cfg(not(feature = "tracing"))]
                     let _ = e;
-                }
+                },
+                Err(Error::SurrealDbError(e)) => {
+                    nack(
+                        channel,
+                        BasicNackArguments::new(deliver.delivery_tag(), false, true),
+                        5,
+                    )
+                    .await;
+                    #[cfg(feature = "tracing")]
+                    tracing::error!("SurrealDB: {}", e);
+                    #[cfg(not(feature = "tracing"))]
+                    let _ = e;
+                },
                 Err(Error::SerializeError(_)) | Err(Error::DeserializeError(_)) => {
                     ack(
                         channel,

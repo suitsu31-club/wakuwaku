@@ -24,6 +24,11 @@ pub enum Error {
     /// Database Error
     DatabaseError(#[from] sqlx::Error),
 
+    #[cfg(feature = "surreal")]
+    #[error("{0}")]
+    /// SurrealDB Error
+    SurrealDbError(#[from] surrealdb::Error),
+
     #[error("{0}")]
     /// Error occurred in business logic. This kind of business error can not be solved by retrying.
     BusinessPanic(anyhow::Error),
@@ -57,6 +62,9 @@ impl From<&Error> for tonic::Status {
 
             #[cfg(feature = "sqlx")]
             Error::DatabaseError(_) => tonic::Status::internal("Database error"),
+
+            #[cfg(feature = "surreal")]
+            Error::SurrealDbError(_) => tonic::Status::internal("Database error"),
 
             Error::Io(_) => tonic::Status::internal("Internal server error"),
             Error::SerializeError(_) | Error::DeserializeError(_) => {
