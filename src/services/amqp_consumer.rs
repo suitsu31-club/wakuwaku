@@ -88,11 +88,261 @@
 //! If a consumer type implements [`AmqpMessageProcessor`] for more than one
 //! event, the event cannot be inferred and must be named:
 //! `AmqpConsumerRegisterCenter::<_, MyEvent>::new(..)` or `.push::<_, MyEvent>(..)`.
+//!
+//! # Building consumers from a [`ServiceBuilder`]
+//!
+//! Consumers usually need shared dependencies such as a database pool or an
+//! HTTP client. Instead of constructing each consumer by hand, implement
+//! [`ServiceCreation`] for it and let
+//! [`ServiceBuilder::amqp_consumer`] build it from a dependency that is
+//! already registered in the service builder. That call returns an
+//! [`AmqpConsumerRegisterCenterBuilder`], which chains more
+//! [`amqp_consumer`](AmqpConsumerRegisterCenterBuilder::amqp_consumer) calls
+//! and ends with either:
+//!
+//! - [`setup`](AmqpConsumerRegisterCenterBuilder::setup), which starts every
+//!   consumer and gives back the service builder together with the
+//!   [`AmqpConsumersRuntime`], or
+//! - [`into_parts`](AmqpConsumerRegisterCenterBuilder::into_parts), which
+//!   returns the service builder and the unstarted
+//!   [`AmqpConsumerRegisterCenter`] so you can start the consumers later.
+//!
+//! Each consumer is created right away, when `amqp_consumer` is called. Its
+//! [`Dep`](ServiceCreation::Dep) is cloned out of the service builder and
+//! the consumer is wrapped in an [`Arc`].
+//!
+//! ```no_run
+//! use wakuwaku::integration::amqp::AmqpPool;
+//! use wakuwaku::services::ServiceCreation;
+//! use wakuwaku::services::builder::ServiceBuilder;
+//! # use kanau::message::{MessageDe, MessageSer};
+//! # use kanau::processor::Processor;
+//! # use wakuwaku::integration::amqp::{
+//! #     AmqpExchangeType, AmqpMessageProcessor, AmqpMessageSend, AmqpRouting,
+//! # };
+//! # macro_rules! event {
+//! #     ($name:ident, $key:literal) => {
+//! #         struct $name;
+//! #         impl MessageSer for $name {
+//! #             type SerError = anyhow::Error;
+//! #             fn to_bytes(self) -> Result<Box<[u8]>, anyhow::Error> { Ok(Box::new([])) }
+//! #         }
+//! #         impl MessageDe for $name {
+//! #             type DeError = anyhow::Error;
+//! #             fn from_bytes(_: &[u8]) -> Result<Self, anyhow::Error> { Ok($name) }
+//! #         }
+//! #         impl AmqpRouting for $name {
+//! #             const EXCHANGE: &'static str = "orders";
+//! #             const EXCHANGE_TYPE: AmqpExchangeType = AmqpExchangeType::Topic;
+//! #             const ROUTING_KEY: &'static str = $key;
+//! #         }
+//! #         impl AmqpMessageSend for $name {}
+//! #     };
+//! # }
+//! # macro_rules! consumes {
+//! #     ($name:ident, $event:ident, $queue:literal) => {
+//! #         impl Processor<$event> for $name {
+//! #             type Output = ();
+//! #             type Error = wakuwaku::Error;
+//! #             async fn process(&self, _: $event) -> Result<(), wakuwaku::Error> { Ok(()) }
+//! #         }
+//! #         impl AmqpMessageProcessor<$event> for $name {
+//! #             const QUEUE: &'static str = $queue;
+//! #         }
+//! #     };
+//! # }
+//! # event!(OrderPlaced, "order.placed");
+//! # event!(OrderShipped, "order.shipped");
+//! # consumes!(SendReceipt, OrderPlaced, "send-receipt");
+//! # consumes!(ReserveStock, OrderPlaced, "reserve-stock");
+//! # consumes!(NotifyCustomer, OrderShipped, "notify-customer");
+//!
+//! // Shared dependencies. They are cloned into each consumer, so keep them
+//! // cheap to clone (handles, `Arc`s, pools).
+//! #[derive(Clone)]
+//! struct Mailer;
+//! #[derive(Clone)]
+//! struct Inventory;
+//!
+//! struct SendReceipt { mailer: Mailer }
+//! impl ServiceCreation for SendReceipt {
+//!     type Dep = Mailer;
+//!     fn create_service(mailer: Mailer) -> Self { Self { mailer } }
+//! }
+//!
+//! struct ReserveStock { inventory: Inventory }
+//! impl ServiceCreation for ReserveStock {
+//!     type Dep = Inventory;
+//!     fn create_service(inventory: Inventory) -> Self { Self { inventory } }
+//! }
+//!
+//! struct NotifyCustomer { mailer: Mailer }
+//! impl ServiceCreation for NotifyCustomer {
+//!     type Dep = Mailer;
+//!     fn create_service(mailer: Mailer) -> Self { Self { mailer } }
+//! }
+//!
+//! async fn start(pool: &AmqpPool) -> Result<(), wakuwaku::Error> {
+//!     // Type parameters: <Consumer, Event, Position>. Leave the event and the
+//!     // dependency's position as `_` to have them inferred.
+//!     let (services, runtime) = ServiceBuilder::new(Mailer)
+//!         .push(Inventory)
+//!         .amqp_consumer::<SendReceipt, _, _>()
+//!         .amqp_consumer::<ReserveStock, _, _>()
+//!         .amqp_consumer::<NotifyCustomer, _, _>()
+//!         .setup(pool)
+//!         .await?;
+//!
+//!     // The service builder is still available to the rest of the app.
+//!     let _mailer: &Mailer = services.provide::<Mailer, _>();
+//!
+//!     // Consumers run until `runtime` is dropped.
+//!     std::future::pending::<()>().await;
+//!     drop(runtime);
+//!     Ok(())
+//! }
+//! ```
+//!
+//! As with `new`/`push`, the event must be named when a consumer handles more
+//! than one event, e.g. `.amqp_consumer::<MyConsumer, MyEvent, _>()`. The
+//! position must be named with [`Here`](super::builder::Here) /
+//! [`There`](super::builder::There) when the dependency's type is registered
+//! more than once.
 
 use crate::integration::amqp::{AmqpMessageProcessor, AmqpMessageSend, AmqpPool, setup_consumer};
+use crate::services::ServiceCreation;
+use crate::services::builder::{ProvideAt, ServiceBuilder, ServiceBuilderPosition};
 use std::collections::LinkedList;
 use std::marker::PhantomData;
 use std::sync::Arc;
+
+/// Registers [`ServiceCreation`] consumers built from a [`ServiceBuilder`].
+///
+/// Pairs a service builder (`SHead`, `SChain`) with an
+/// [`AmqpConsumerRegisterCenter`] (`Consumer`, `Event`, `AChain`) that is
+/// being filled from it. Get one from [`ServiceBuilder::amqp_consumer`],
+/// register more consumers with [`amqp_consumer`](Self::amqp_consumer), then
+/// finish with [`setup`](Self::setup) or [`into_parts`](Self::into_parts).
+/// See the [module documentation](self#building-consumers-from-a-servicebuilder)
+/// for an example.
+pub struct AmqpConsumerRegisterCenterBuilder<
+    SHead,
+    SChain,
+    Consumer: AmqpMessageProcessor<Event>,
+    Event: AmqpMessageSend + kanau::message::MessageDe,
+    AChain,
+> {
+    /// The service builder that consumer dependencies are taken from.
+    pub builder: ServiceBuilder<SHead, SChain>,
+    register_center: AmqpConsumerRegisterCenter<Consumer, Event, AChain>,
+}
+
+impl<SH, SC, C, E, AC> AmqpConsumerRegisterCenterBuilder<SH, SC, C, E, AC>
+where
+    C: AmqpMessageProcessor<E>,
+    E: AmqpMessageSend + kanau::message::MessageDe,
+{
+    /// Pair an existing service builder with an existing consumer list.
+    ///
+    /// Usually you don't need this: [`ServiceBuilder::amqp_consumer`] creates
+    /// the builder for you.
+    pub fn new(
+        builder: ServiceBuilder<SH, SC>,
+        register_center: AmqpConsumerRegisterCenter<C, E, AC>,
+    ) -> Self {
+        Self {
+            builder,
+            register_center,
+        }
+    }
+
+    /// Create `NewConsumer` from its dependency and register it.
+    ///
+    /// The dependency, [`NewConsumer::Dep`](ServiceCreation::Dep), is looked
+    /// up in [`builder`](Self::builder) at `Position` and cloned. The
+    /// consumer is then created with
+    /// [`create_service`](ServiceCreation::create_service), wrapped in an
+    /// [`Arc`], and pushed onto the list the same way as
+    /// [`AmqpConsumerRegisterCenter::push`]. It starts after every consumer
+    /// registered before it.
+    ///
+    /// `NewEvent` and `Position` can usually be passed as `_`. `NewEvent` is
+    /// inferred when `NewConsumer` implements [`AmqpMessageProcessor`] for
+    /// only one event. `Position` is inferred when exactly one service of
+    /// type `NewConsumer::Dep` is registered. A dependency that was never
+    /// registered is a compile error.
+    pub fn amqp_consumer<NewConsumer, NewEvent, Position>(
+        self,
+    ) -> AmqpConsumerRegisterCenterBuilder<
+        SH,
+        SC,
+        NewConsumer,
+        NewEvent,
+        AmqpConsumerRegisterCenter<C, E, AC>,
+    >
+    where
+        NewConsumer: AmqpMessageProcessor<NewEvent> + ServiceCreation,
+        NewEvent: AmqpMessageSend + kanau::message::MessageDe,
+        Position: ServiceBuilderPosition,
+        ServiceBuilder<SH, SC>: ProvideAt<NewConsumer::Dep, Position>,
+    {
+        let service_dep = self.builder.provide::<NewConsumer::Dep, Position>().clone();
+        let new_service = std::sync::Arc::new(NewConsumer::create_service(service_dep));
+        let register_center = self.register_center.push(new_service);
+        AmqpConsumerRegisterCenterBuilder {
+            builder: self.builder,
+            register_center,
+        }
+    }
+
+    /// Split into the service builder and the unstarted consumer list.
+    ///
+    /// Use this to start the consumers later with
+    /// [`AmqpConsumerRegisterCenter::setup`], or to keep adding consumers
+    /// that are built by hand with [`AmqpConsumerRegisterCenter::push`].
+    pub fn into_parts(
+        self,
+    ) -> (
+        ServiceBuilder<SH, SC>,
+        AmqpConsumerRegisterCenter<C, E, AC>,
+    ) {
+        (self.builder, self.register_center)
+    }
+}
+
+impl<SH, SC, C, E, AC> AmqpConsumerRegisterCenterBuilder<SH, SC, C, E, AC>
+where
+    C: AmqpMessageProcessor<E> + Send + Sync + 'static,
+    E: kanau::message::MessageDe + AmqpMessageSend + Send + Sync + 'static,
+    <E as kanau::message::MessageDe>::DeError: Send + Sync,
+    AmqpConsumerRegisterCenter<C, E, AC>: Send + Sync + SetupOrderedConsumers,
+{
+    /// Start every registered consumer and return the service builder
+    /// together with the running consumers.
+    ///
+    /// This is [`into_parts`](Self::into_parts) followed by
+    /// [`AmqpConsumerRegisterCenter::setup`]. The consumers start in
+    /// registration order and stop when the returned
+    /// [`AmqpConsumersRuntime`] is dropped.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`AmqpConsumerRegisterCenter::setup`]. On error the service
+    /// builder is dropped along with the consumers.
+    pub async fn setup(
+        self,
+        channel_pool: &AmqpPool,
+    ) -> Result<
+        (
+            ServiceBuilder<SH, SC>,
+            AmqpConsumersRuntime<AmqpConsumerRegisterCenter<C, E, AC>>,
+        ),
+        crate::error::Error,
+    > {
+        let runtime = self.register_center.setup(channel_pool).await?;
+        Ok((self.builder, runtime))
+    }
+}
 
 /// A node in the type-level list of registered consumers.
 ///

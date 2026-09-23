@@ -47,6 +47,8 @@ wakuwaku = { version = "0.1", default-features = false, features = ["redis"] }
   `DatabaseProcessor` wrapper around `sqlx::PgPool`.
 - `wakuwaku::pool`  
   Generic bounded async resource pool.
+- `wakuwaku::services`  
+  `ServiceBuilder` (compile-time, type-indexed service registry), `ServiceCreation` (build a service from a registered dependency), and, with `amqprs`, `AmqpConsumerRegisterCenter` for starting a group of consumers together. `ServiceBuilder::amqp_consumer::<Consumer, _, _>()` builds each consumer from its registered dependency and ends with `.setup(&pool)`.
 - `wakuwaku::error`  
   Unified error type used across features.
 

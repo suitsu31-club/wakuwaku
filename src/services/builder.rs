@@ -48,6 +48,11 @@
 //! assert_eq!(*services.provide::<u32, There<Here>>(), 1);
 //! ```
 
+#[cfg(feature = "amqprs")]
+use crate::integration::amqp::{AmqpMessageProcessor, AmqpMessageSend};
+
+#[cfg(feature = "amqprs")]
+use crate::services::ServiceCreation;
 use std::marker::PhantomData;
 
 /// A node in the type-level service list.
@@ -87,6 +92,39 @@ impl<Head, Chain> ServiceBuilder<Head, Chain> {
         I: ServiceBuilderPosition,
     {
         <Self as ProvideAt<T, I>>::provide_at(self)
+    }
+
+    /// Create an AMQP consumer from a registered dependency and start a
+    /// consumer list.
+    ///
+    /// `Consumer`'s [`Dep`](ServiceCreation::Dep) is looked up at `Position`
+    /// and cloned. The consumer is then created with
+    /// [`create_service`](ServiceCreation::create_service), wrapped in an
+    /// `Arc`, and becomes the first entry of a new
+    /// [`AmqpConsumerRegisterCenter`](super::amqp_consumer::AmqpConsumerRegisterCenter).
+    /// The returned builder takes ownership of `self`. Chain more
+    /// `amqp_consumer` calls on it, then call `setup` or `into_parts`.
+    ///
+    /// `Event` and `Position` can usually be passed as `_`. The event is
+    /// inferred when `Consumer` implements [`AmqpMessageProcessor`] for only
+    /// one event. The position is inferred when the dependency's type is
+    /// registered exactly once. See the
+    /// [`amqp_consumer` module documentation](super::amqp_consumer#building-consumers-from-a-servicebuilder)
+    /// for an example.
+    #[cfg(feature = "amqprs")]
+    pub fn amqp_consumer<Consumer, Event, Position>(
+        self,
+    ) -> super::amqp_consumer::AmqpConsumerRegisterCenterBuilder<Head, Chain, Consumer, Event, ()>
+    where
+        Position: ServiceBuilderPosition,
+        Consumer: AmqpMessageProcessor<Event> + ServiceCreation,
+        Event: AmqpMessageSend + kanau::message::MessageDe,
+        Self: ProvideAt<Consumer::Dep, Position>,
+    {
+        let service_dep: Consumer::Dep = self.provide::<Consumer::Dep, Position>().clone();
+        let new_service = std::sync::Arc::new(Consumer::create_service(service_dep));
+        let register_center = super::amqp_consumer::AmqpConsumerRegisterCenter::new(new_service);
+        super::amqp_consumer::AmqpConsumerRegisterCenterBuilder::new(self, register_center)
     }
 }
 
