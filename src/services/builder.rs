@@ -51,7 +51,7 @@
 #[cfg(feature = "amqprs")]
 use crate::integration::amqp::{AmqpMessageProcessor, AmqpMessageSend};
 
-#[cfg(feature = "amqprs")]
+#[cfg(any(feature = "amqprs", feature = "tonic"))]
 use crate::services::ServiceCreation;
 use std::marker::PhantomData;
 
@@ -125,6 +125,40 @@ impl<Head, Chain> ServiceBuilder<Head, Chain> {
         let new_service = std::sync::Arc::new(Consumer::create_service(service_dep));
         let register_center = super::amqp_consumer::AmqpConsumerRegisterCenter::new(new_service);
         super::amqp_consumer::AmqpConsumerRegisterCenterBuilder::new(self, register_center)
+    }
+
+    /// Create a gRPC service implementation from a registered dependency,
+    /// wrap it into its server, and start a server list.
+    ///
+    /// `ServiceImpl`'s [`Dep`](ServiceCreation::Dep) is looked up at
+    /// `Position` and cloned. The implementation is then created with
+    /// [`create_service`](ServiceCreation::create_service), turned into a
+    /// `Server` with `into_server` (for tonic-generated servers, pass
+    /// `XxxServer::new`), and becomes the first entry of a new
+    /// [`GrpcServiceRegisterCenter`](super::grpc_service::GrpcServiceRegisterCenter).
+    /// The returned builder takes ownership of `self`. Chain more
+    /// `grpc_service` calls on it, then call `into_router_fn` or `into_parts`.
+    ///
+    /// Write a generated server type as `XxxServer<_>`; its type parameter is
+    /// inferred from `ServiceImpl`. The position is inferred with `_` when the
+    /// dependency's type is registered exactly once. See the
+    /// [`grpc_service` module documentation](super::grpc_service#building-servers-from-a-servicebuilder)
+    /// for an example.
+    #[cfg(feature = "tonic")]
+    pub fn grpc_service<Server, ServiceImpl, Position>(
+        self,
+        into_server: impl FnOnce(ServiceImpl) -> Server,
+    ) -> super::grpc_service::GrpcServiceRegisterCenterBuilder<Head, Chain, Server, ()>
+    where
+        Server: super::grpc_service::RoutableService,
+        ServiceImpl: ServiceCreation,
+        Position: ServiceBuilderPosition,
+        Self: ProvideAt<ServiceImpl::Dep, Position>,
+    {
+        let service_dep = self.provide::<ServiceImpl::Dep, Position>().clone();
+        let server = into_server(ServiceImpl::create_service(service_dep));
+        let register_center = super::grpc_service::GrpcServiceRegisterCenter::new(server);
+        super::grpc_service::GrpcServiceRegisterCenterBuilder::new(self, register_center)
     }
 }
 

@@ -1,18 +1,22 @@
 //! Service composition helpers: a type-indexed service registry, the
 //! [`ServiceCreation`] trait for building services from registered
 //! dependencies, and, with the `amqprs` feature, grouped RabbitMQ consumer
-//! setup.
+//! setup and, with the `tonic` feature, grouped gRPC server registration.
 
 pub mod builder;
 
 #[cfg(feature = "amqprs")]
 pub mod amqp_consumer;
 
+#[cfg(feature = "tonic")]
+pub mod grpc_service;
+
 /// A service that can be constructed from a single dependency.
 ///
 /// With the `amqprs` feature, `ServiceBuilder::amqp_consumer` uses it to
-/// create consumers from services already registered in a
-/// [`ServiceBuilder`](builder::ServiceBuilder).
+/// create consumers, and with the `tonic` feature, `ServiceBuilder::grpc_service`
+/// uses it to create gRPC service implementations, from services already
+/// registered in a [`ServiceBuilder`](builder::ServiceBuilder).
 ///
 /// The dependency is looked up by its type. If a service needs several
 /// dependencies, register a struct (or tuple) that holds them all and use

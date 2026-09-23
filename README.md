@@ -48,7 +48,7 @@ wakuwaku = { version = "0.1", default-features = false, features = ["redis"] }
 - `wakuwaku::pool`  
   Generic bounded async resource pool.
 - `wakuwaku::services`  
-  `ServiceBuilder` (compile-time, type-indexed service registry), `ServiceCreation` (build a service from a registered dependency), and, with `amqprs`, `AmqpConsumerRegisterCenter` for starting a group of consumers together. `ServiceBuilder::amqp_consumer::<Consumer, _, _>()` builds each consumer from its registered dependency and ends with `.setup(&pool)`.
+  `ServiceBuilder` (compile-time, type-indexed service registry), `ServiceCreation` (build a service from a registered dependency), and, with `amqprs`, `AmqpConsumerRegisterCenter` for starting a group of consumers together. `ServiceBuilder::amqp_consumer::<Consumer, _, _>()` builds each consumer from its registered dependency and ends with `.setup(&pool)`. With `tonic`, `GrpcServiceRegisterCenter` collects gRPC servers; `ServiceBuilder::grpc_service::<XxxServer<_>, ServiceImpl, _>(XxxServer::new)` builds each server from its implementation's registered dependency and ends with `.into_router_fn()`, an `impl FnOnce(Router<L>) -> Router<L>` that adds every server to a tonic router.
 - `wakuwaku::error`  
   Unified error type used across features.
 
