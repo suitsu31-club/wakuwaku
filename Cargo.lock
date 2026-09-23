@@ -647,15 +647,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
 
 [[package]]
-name = "convert_case"
-version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "baaaa0ecca5b51987b9423ccdc971514dd8b0bb7b4060b983d3664dad3f1f89f"
-dependencies = [
- "unicode-segmentation",
-]
-
-[[package]]
 name = "core-foundation"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2160,9 +2151,9 @@ dependencies = [
 
 [[package]]
 name = "kanau"
-version = "0.5.2"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d84a4cb99093a2c0f20ac0dbf1784d1a18291150f2ffb9359e72f36765f13874"
+checksum = "3cedf7ef16cd6cb58af505ee3f340e8c5751d216865ed877aaf7a4537cfad538"
 dependencies = [
  "anyhow",
  "futures",
@@ -2174,14 +2165,13 @@ dependencies = [
 
 [[package]]
 name = "kanau-macro"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d39705f0cf94b1adf34d1899d68fef74c585cadb96103079f887fac4e27377f6"
+checksum = "814babf2580d5379fbf1743e75346f499342ca4019ba9f94c502c4671b59ff67"
 dependencies = [
- "convert_case",
+ "proc-macro-crate",
  "proc-macro2",
  "quote",
- "regex",
  "syn 2.0.119",
 ]
 
@@ -4880,12 +4870,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7df058c713841ad818f1dc5d3fd88063241cc61f49f5fbea4b951e8cf5a8d71d"
 
 [[package]]
-name = "unicode-segmentation"
-version = "1.13.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c6f5d3c3b1bf09027a88a6bc961fc00497d651009560b5463668dc81b0fa87a8"
-
-[[package]]
 name = "untrusted"
 version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4959,7 +4943,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "wakuwaku"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "amqprs",
  "anyhow",
