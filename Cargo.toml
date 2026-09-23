@@ -1,6 +1,6 @@
 [package]
 name = "wakuwaku"
-version = "0.2.4"
+version = "0.3.0"
 edition = "2024"
 description = "Async backend utilities for RabbitMQ, SQLx, Redis, and pooled resources"
 license = "MIT"
