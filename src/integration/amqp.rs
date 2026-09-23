@@ -47,20 +47,22 @@ pub trait AmqpRouting {
     #[allow(async_fn_in_trait)]
     #[cfg_attr(feature = "tracing", tracing::instrument(skip_all, err, ret))]
     /// Declare the exchange used by this routing definition.
-    async fn ensure_exchange(pool: &AmqpPool) -> Result<(), Error> {
-        let channel: Result<Pooled<Channel, _>, Error> = pool.get().await.into();
-        let channel = channel?;
-        let channel = channel
-            .get_ref()
-            .ok_or(Error::Io(anyhow::anyhow!("Channel is unexpectedly closed")))?;
-        channel
-            .exchange_declare(
-                ExchangeDeclareArguments::of_type(Self::EXCHANGE, Self::EXCHANGE_TYPE)
-                    .durable(true)
-                    .finish(),
-            )
-            .await?;
-        Ok(())
+    fn ensure_exchange(pool: &AmqpPool) -> impl Future<Output = Result<(), Error>> + Send {
+        async {
+            let channel: Result<Pooled<Channel, _>, Error> = pool.get().await.into();
+            let channel = channel?;
+            let channel = channel
+                .get_ref()
+                .ok_or(Error::Io(anyhow::anyhow!("Channel is unexpectedly closed")))?;
+            channel
+                .exchange_declare(
+                    ExchangeDeclareArguments::of_type(Self::EXCHANGE, Self::EXCHANGE_TYPE)
+                        .durable(true)
+                        .finish(),
+                )
+                .await?;
+            Ok(())
+        }
     }
 }
 
@@ -107,20 +109,24 @@ pub trait AmqpMessageProcessor<Message: AmqpMessageSend + MessageDe>:
     #[allow(async_fn_in_trait)]
     #[cfg_attr(feature = "tracing", tracing::instrument(skip_all, err))]
     /// Ensure the topology of the queue and get the channel with the queue bound
-    async fn ensure_queue(pool: &AmqpPool) -> Result<Channel, crate::error::Error> {
-        // ensure exchange first
-        Message::ensure_exchange(pool).await?;
+    fn ensure_queue(
+        pool: &AmqpPool,
+    ) -> impl Future<Output = Result<Channel, crate::error::Error>> + Send {
+        async {
+            // ensure exchange first
+            Message::ensure_exchange(pool).await?;
 
-        // Declare a durable, client-named queue
-        let channel = pool.factory_create().await?;
-        let queue_arg = QueueDeclareArguments::durable_client_named(Self::QUEUE);
-        channel.queue_declare(queue_arg).await?;
+            // Declare a durable, client-named queue
+            let channel = pool.factory_create().await?;
+            let queue_arg = QueueDeclareArguments::durable_client_named(Self::QUEUE);
+            channel.queue_declare(queue_arg).await?;
 
-        // Bind queue -> exchange with routing key
-        let queue_bind_arg =
-            QueueBindArguments::new(Self::QUEUE, Message::EXCHANGE, Message::ROUTING_KEY);
-        channel.queue_bind(queue_bind_arg).await?;
-        Ok(channel)
+            // Bind queue -> exchange with routing key
+            let queue_bind_arg =
+                QueueBindArguments::new(Self::QUEUE, Message::EXCHANGE, Message::ROUTING_KEY);
+            channel.queue_bind(queue_bind_arg).await?;
+            Ok(channel)
+        }
     }
 }
 
