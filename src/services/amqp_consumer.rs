@@ -300,12 +300,7 @@ where
     /// Use this to start the consumers later with
     /// [`AmqpConsumerRegisterCenter::setup`], or to keep adding consumers
     /// that are built by hand with [`AmqpConsumerRegisterCenter::push`].
-    pub fn into_parts(
-        self,
-    ) -> (
-        ServiceBuilder<SH, SC>,
-        AmqpConsumerRegisterCenter<C, E, AC>,
-    ) {
+    pub fn into_parts(self) -> (ServiceBuilder<SH, SC>, AmqpConsumerRegisterCenter<C, E, AC>) {
         (self.builder, self.register_center)
     }
 }
