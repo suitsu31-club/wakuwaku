@@ -16,12 +16,12 @@
 #[cfg(feature = "amqprs")]
 /// RabbitMQ publishing/consuming abstractions.
 pub mod amqp;
-#[cfg(feature = "sqlx")]
-/// SQLx PostgreSQL wrapper utilities.
-pub mod sqlx;
 #[cfg(feature = "redis")]
 /// Redis key-value helper traits and types.
 pub mod redis;
+#[cfg(feature = "sqlx")]
+/// SQLx PostgreSQL wrapper utilities.
+pub mod sqlx;
 #[cfg(feature = "surreal")]
 /// SurrealDB wrapper utilities.
 pub mod surreal;
