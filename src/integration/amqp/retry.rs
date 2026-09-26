@@ -18,7 +18,8 @@
 //!
 //! Messages in `Q.retry` expire in queue order: one with a short delay waits behind one with
 //! a longer delay that is ahead of it. A retry can therefore come later than its own backoff,
-//! but never later than [`RetryPolicy::max_delay`] after the failure.
+//! but never later than [`RetryPolicy::max_delay`] after the failure. A processor that must
+//! not wait long gives itself a short `max_delay`.
 
 use crate::error::Error;
 use amqprs::{
@@ -55,7 +56,7 @@ pub fn dead_letter_queue_name(queue: &str) -> String {
 ///
 /// The delay after the n-th failed attempt is `initial_delay * multiplier^(n-1)`, capped at
 /// `max_delay`. After `max_attempts` failed attempts the message is parked in the
-/// dead-letter queue.
+/// dead-letter queue, or dropped if `park_when_exhausted` is `false`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RetryPolicy {
     /// Attempts in total, the first delivery included. 1 parks a message on its first failure.
@@ -66,16 +67,21 @@ pub struct RetryPolicy {
     pub multiplier: u32,
     /// Upper bound of a single delay.
     pub max_delay: Duration,
+    /// Whether a message whose attempts ran out is parked in the dead-letter queue (`true`) or
+    /// acknowledged and dropped (`false`), for messages that are worthless once they are late.
+    pub park_when_exhausted: bool,
 }
 
 impl RetryPolicy {
     /// 10 attempts, waiting 1 s, 4 s, 16 s, 64 s, 256 s and then 10 min between them: a message
-    /// is parked about 46 minutes after its first failure.
+    /// is parked about 46 minutes after its first failure, later if other messages were waiting
+    /// in the retry queue ahead of it.
     pub const DEFAULT: Self = Self {
         max_attempts: 10,
         initial_delay: Duration::from_secs(1),
         multiplier: 4,
         max_delay: Duration::from_secs(600),
+        park_when_exhausted: true,
     };
 
     /// This policy with a different number of attempts.
@@ -101,8 +107,16 @@ impl RetryPolicy {
         }
     }
 
+    /// This policy, dropping a message whose attempts ran out instead of parking it.
+    pub const fn discard_when_exhausted(self) -> Self {
+        Self {
+            park_when_exhausted: false,
+            ..self
+        }
+    }
+
     /// How long to wait after the `failed_attempts`-th failed attempt, or `None` when the
-    /// message has had all its attempts and must be parked.
+    /// message has had all its attempts.
     pub fn next_delay(&self, failed_attempts: u32) -> Option<Duration> {
         if failed_attempts >= self.max_attempts {
             return None;
@@ -128,7 +142,8 @@ impl Default for RetryPolicy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FailureAction {
     /// Try again later, following the processor's [`RetryPolicy`]; park the message in the
-    /// dead-letter queue once the attempts run out.
+    /// dead-letter queue once the attempts run out (or drop it, see
+    /// [`RetryPolicy::park_when_exhausted`]).
     Retry,
     /// Park the message in the dead-letter queue right away: retrying cannot help.
     DeadLetter,

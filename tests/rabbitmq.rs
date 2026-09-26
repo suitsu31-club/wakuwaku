@@ -16,8 +16,8 @@ use std::time::{Duration, Instant};
 use wakuwaku::Error;
 use wakuwaku::integration::amqp::{
     AmqpExchangeType, AmqpMessageProcessor, AmqpMessageSend, AmqpPool, AmqpRouting,
-    DEAD_LETTER_REASON_HEADER, FAILED_ATTEMPTS_HEADER, LAST_ERROR_HEADER, QUEUE_HEADER,
-    RetryPolicy, dead_letter_queue_name, retry_queue_name,
+    DEAD_LETTER_REASON_HEADER, FAILED_ATTEMPTS_HEADER, LAST_ERROR_HEADER, PublishOutcome,
+    QUEUE_HEADER, RetryPolicy, dead_letter_queue_name, retry_queue_name,
 };
 use wakuwaku::services::amqp_consumer::AmqpConsumerRegisterCenter;
 
@@ -75,7 +75,7 @@ fn header_text(properties: &BasicProperties, name: &str) -> String {
 
 /// An event whose body is a big-endian `u32`; any other body fails to decode.
 macro_rules! event {
-    ($name:ident, $exchange:literal) => {
+    ($name:ident, $exchange:literal $(, require_route = $require_route:expr)?) => {
         struct $name(u32);
 
         impl MessageSer for $name {
@@ -99,14 +99,16 @@ macro_rules! event {
             const ROUTING_KEY: &'static str = "test";
         }
 
-        impl AmqpMessageSend for $name {}
+        impl AmqpMessageSend for $name {
+            $(const REQUIRE_ROUTE: bool = $require_route;)?
+        }
     };
 }
 
 /// A processor that fails its first `failures` attempts with `error()`, then succeeds, and
-/// records when each attempt happened.
+/// records when each attempt happened. It retries quickly, `$max_attempts` times in all.
 macro_rules! processor {
-    ($name:ident, $event:ident, $queue:literal, $max_attempts:expr) => {
+    ($name:ident, $event:ident, $queue:literal, policy = $policy:expr) => {
         struct $name {
             failures: usize,
             error: fn() -> Error,
@@ -144,10 +146,18 @@ macro_rules! processor {
 
         impl AmqpMessageProcessor<$event> for $name {
             const QUEUE: &'static str = $queue;
-            const RETRY_POLICY: RetryPolicy = RetryPolicy::DEFAULT
-                .with_max_attempts($max_attempts)
-                .with_backoff(Duration::from_millis(200), 2, Duration::from_secs(1));
+            const RETRY_POLICY: RetryPolicy = $policy;
         }
+    };
+    ($name:ident, $event:ident, $queue:literal, $max_attempts:expr) => {
+        processor!(
+            $name,
+            $event,
+            $queue,
+            policy = RetryPolicy::DEFAULT
+                .with_max_attempts($max_attempts)
+                .with_backoff(Duration::from_millis(200), 2, Duration::from_secs(1))
+        );
     };
 }
 
@@ -441,3 +451,166 @@ async fn the_consumer_runtime_reports_a_lost_connection() {
 }
 
 processor!(LostProcessor, RetriedEvent, "wakuwaku-test-retried-lost", 5);
+
+event!(DroppedEvent, "wakuwaku-test-unroutable");
+event!(
+    RequiredEvent,
+    "wakuwaku-test-unroutable",
+    require_route = true
+);
+
+#[tokio::test]
+async fn an_unroutable_message_is_an_error_only_when_it_requires_a_route() {
+    let Some(connection) = connect().await else {
+        return;
+    };
+    let pool = AmqpPool::connect(connection.clone()).await;
+    // The exchange exists, but no queue is bound to it.
+    DroppedEvent::ensure_exchange(&pool).await.unwrap();
+
+    assert_eq!(
+        DroppedEvent(1).publish(&pool).await.unwrap(),
+        PublishOutcome::Returned {
+            reply_code: 312,
+            reply_text: "NO_ROUTE".to_string()
+        }
+    );
+    DroppedEvent(1).send(&pool).await.unwrap();
+    let error = RequiredEvent(1).send(&pool).await.unwrap_err();
+    assert!(error.to_string().contains("no queue is bound"), "{error}");
+}
+
+event!(RedeclaredEvent, "wakuwaku-test-redeclared");
+processor!(
+    RedeclaredProcessor,
+    RedeclaredEvent,
+    "wakuwaku-test-redeclared",
+    5
+);
+
+#[tokio::test]
+async fn a_deleted_retry_queue_is_declared_again() {
+    let Some(connection) = connect().await else {
+        return;
+    };
+    let admin = connection.open_channel(None).await.unwrap();
+    let queue = "wakuwaku-test-redeclared";
+    delete_queues(&admin, queue).await;
+    let pool = AmqpPool::connect(connection.clone()).await;
+    let processor = RedeclaredProcessor::new(1, io_error);
+    let _consumers = AmqpConsumerRegisterCenter::new(processor.clone())
+        .setup(&pool)
+        .await
+        .unwrap();
+    admin
+        .queue_delete(QueueDeleteArguments::new(&retry_queue_name(queue)))
+        .await
+        .unwrap();
+
+    RedeclaredEvent(1).send(&pool).await.unwrap();
+
+    wait_for("the retried attempt", async || {
+        processor.attempts().len() == 2
+    })
+    .await;
+    let attempts = processor.attempts();
+    // Retried after its backoff, not requeued after the 5 s fallback.
+    assert!(attempts[1] - attempts[0] < Duration::from_secs(4));
+    assert_eq!(ready_messages(&admin, &retry_queue_name(queue)).await, 0);
+}
+
+event!(DeletedQueueEvent, "wakuwaku-test-deleted-queue");
+processor!(
+    DeletedQueueProcessor,
+    DeletedQueueEvent,
+    "wakuwaku-test-deleted-queue",
+    5
+);
+
+#[tokio::test]
+async fn deleting_a_consumer_queue_makes_the_runtime_report_it_closed() {
+    let Some(connection) = connect().await else {
+        return;
+    };
+    let admin = connection.open_channel(None).await.unwrap();
+    let queue = "wakuwaku-test-deleted-queue";
+    delete_queues(&admin, queue).await;
+    let pool = AmqpPool::connect(connection.clone()).await;
+    let consumers = AmqpConsumerRegisterCenter::new(DeletedQueueProcessor::new(0, io_error))
+        .setup(&pool)
+        .await
+        .unwrap();
+
+    admin
+        .queue_delete(QueueDeleteArguments::new(queue))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), consumers.closed())
+        .await
+        .expect("closed() resolves once the broker cancelled the consumer");
+    assert!(connection.is_open());
+}
+
+event!(LateEvent, "wakuwaku-test-late");
+processor!(
+    LateProcessor,
+    LateEvent,
+    "wakuwaku-test-late",
+    policy = RetryPolicy::DEFAULT
+        .with_max_attempts(2)
+        .with_backoff(Duration::from_millis(200), 2, Duration::from_secs(1))
+        .discard_when_exhausted()
+);
+
+#[tokio::test]
+async fn a_policy_can_drop_messages_whose_attempts_ran_out() {
+    let Some(connection) = connect().await else {
+        return;
+    };
+    let admin = connection.open_channel(None).await.unwrap();
+    let queue = "wakuwaku-test-late";
+    delete_queues(&admin, queue).await;
+    let pool = AmqpPool::connect(connection.clone()).await;
+    let processor = LateProcessor::new(usize::MAX, io_error);
+    let _consumers = AmqpConsumerRegisterCenter::new(processor.clone())
+        .setup(&pool)
+        .await
+        .unwrap();
+
+    LateEvent(1).send(&pool).await.unwrap();
+
+    wait_for("both attempts", async || processor.attempts().len() == 2).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(processor.attempts().len(), 2);
+    for name in [
+        queue.to_string(),
+        retry_queue_name(queue),
+        dead_letter_queue_name(queue),
+    ] {
+        assert_eq!(ready_messages(&admin, &name).await, 0, "{name}");
+    }
+}
+
+event!(LeakingEvent, "wakuwaku-test-leaking-missing-exchange");
+
+#[tokio::test]
+async fn the_pool_closes_the_connection_before_channel_numbers_run_out() {
+    let Some(connection) = connect().await else {
+        return;
+    };
+    let channel_max = connection.channel_max();
+    // Leave 5 spare channel numbers: 128 are reserved for consumers.
+    let spare = 5;
+    let capacity = usize::from(channel_max) - 128 - spare;
+    let pool = AmqpPool::connect_with_capacity(connection.clone(), capacity).await;
+    assert_eq!(pool.capacity(), capacity);
+
+    // Every send makes the broker close its channel: the exchange does not exist.
+    for _ in 0..spare {
+        let error = LeakingEvent(1).send(&pool).await.unwrap_err();
+        assert!(error.to_string().contains("404"), "{error}");
+    }
+    let error = LeakingEvent(1).send(&pool).await.unwrap_err();
+    assert!(error.to_string().contains("closed 5 channels"), "{error}");
+    wait_for("the connection to close", async || !connection.is_open()).await;
+}

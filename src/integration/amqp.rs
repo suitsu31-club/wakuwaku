@@ -26,7 +26,7 @@ use amqprs::{
     BasicProperties, DELIVERY_MODE_PERSISTENT, DELIVERY_MODE_TRANSIENT, Deliver, FieldTable,
     FieldValue,
 };
-use confirm::ConfirmState;
+use confirm::{ChannelLeaks, ConfirmState};
 use kanau::message::{MessageDe, MessageSer};
 use kanau::processor::Processor;
 use retry::Destination;
@@ -35,6 +35,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::OnceCell;
+use tokio::time::Instant;
 
 /// Pool of AMQP channels opened from a shared connection.
 ///
@@ -59,6 +60,12 @@ impl AmqpPool {
     /// The pool holds at most [`DEFAULT_POOL_CAPACITY`] channels, and never more than the
     /// connection's negotiated `channel_max` minus [`RESERVED_CHANNELS`]. When all of them are
     /// in use, [`get`](crate::pool::Pool::get) waits for one to come back.
+    ///
+    /// amqprs never reuses the number of a channel the broker closed (for example after a
+    /// publish to an exchange that does not exist). Once the broker has closed as many of the
+    /// pool's channels as the connection has numbers to spare, the pool closes the connection
+    /// instead of letting amqprs run out of channel numbers on a connection that still looks
+    /// open. Watch the connection and reconnect, or exit and get restarted, when it closes.
     pub async fn connect(connection: amqprs::connection::Connection) -> Self {
         Self::connect_with_capacity(connection, DEFAULT_POOL_CAPACITY).await
     }
@@ -70,9 +77,25 @@ impl AmqpPool {
         capacity: usize,
     ) -> Self {
         let capacity = capacity.min(max_pooled_channels(connection.channel_max()));
+        let leaks = Arc::new(ChannelLeaks::new(channel_leak_budget(
+            connection.channel_max(),
+            capacity,
+        )));
         let factory = move || {
             let connection = connection.clone();
-            Box::pin(async move { ConfirmChannel::open(&connection).await })
+            let leaks = leaks.clone();
+            Box::pin(async move {
+                if let Some(closed) = leaks.exhausted() {
+                    return Err(close_leaking_connection(connection, &leaks, closed));
+                }
+                // Opening a channel waits for the broker. Open it in a task of its own: a
+                // caller that stops waiting would otherwise leave amqprs holding a channel
+                // number that is never released. A channel nobody waits for any more is
+                // dropped, which closes it and frees its number.
+                tokio::spawn(async move { ConfirmChannel::open_counting(&connection, leaks).await })
+                    .await
+                    .map_err(|e| amqprs::error::Error::ChannelOpenError(e.to_string()))?
+            })
                 as Pin<
                     Box<dyn Future<Output = Result<ConfirmChannel, amqprs::error::Error>> + Send>,
                 >
@@ -81,16 +104,56 @@ impl AmqpPool {
     }
 }
 
-/// How many pooled channels a connection with the given `channel_max` leaves room for.
-fn max_pooled_channels(channel_max: u16) -> usize {
-    // 0 means "no limit" in AMQP: the protocol maximum.
-    let channel_max = usize::from(if channel_max == 0 {
+/// Close a connection whose channel numbers are running out, once, and explain why.
+fn close_leaking_connection(
+    connection: amqprs::connection::Connection,
+    leaks: &ChannelLeaks,
+    closed: usize,
+) -> amqprs::error::Error {
+    if leaks.start_closing() {
+        #[cfg(feature = "tracing")]
+        tracing::error!(
+            closed_by_broker = closed,
+            budget = leaks.budget(),
+            "RabbitMQ closed {closed} channels on this connection, and amqprs cannot reuse their \
+             numbers; closing the connection before it runs out of them"
+        );
+        tokio::spawn(async move {
+            let _ = connection.close().await;
+        });
+    }
+    amqprs::error::Error::ChannelOpenError(format!(
+        "RabbitMQ closed {closed} channels on this connection (budget {}); the connection is \
+         closed so that a new one can be opened",
+        leaks.budget()
+    ))
+}
+
+/// Effective channel numbers of a connection: 0 means "no limit" in AMQP, the protocol maximum.
+fn channel_numbers(channel_max: u16) -> usize {
+    usize::from(if channel_max == 0 {
         u16::MAX
     } else {
         channel_max
-    });
-    let reserved = usize::from(RESERVED_CHANNELS).min(channel_max / 2);
-    (channel_max - reserved).max(1)
+    })
+}
+
+/// Channel numbers kept for channels opened outside of the pool.
+fn reserved_channels(channel_max: u16) -> usize {
+    usize::from(RESERVED_CHANNELS).min(channel_numbers(channel_max) / 2)
+}
+
+/// How many pooled channels a connection with the given `channel_max` leaves room for.
+fn max_pooled_channels(channel_max: u16) -> usize {
+    (channel_numbers(channel_max) - reserved_channels(channel_max)).max(1)
+}
+
+/// How many channels the broker may close before a pool of `capacity` channels closes the
+/// connection: the numbers left over once the pool and the reserved channels are open.
+fn channel_leak_budget(channel_max: u16, capacity: usize) -> usize {
+    channel_numbers(channel_max)
+        .saturating_sub(capacity + reserved_channels(channel_max))
+        .max(1)
 }
 
 /// Trait for routing message to rabbitmq
@@ -134,17 +197,36 @@ pub trait AmqpMessageSend: MessageSer + Send + Sized + AmqpRouting {
     /// messages that are worthless after a restart.
     const PERSISTENT: bool = true;
 
+    /// Whether a message that no queue is bound to take is an error. By default the broker
+    /// drops such a message and [`send`](Self::send) succeeds. Set it for messages that must
+    /// not get lost when their consumer's queue does not exist yet, so that the caller can
+    /// report the failure to whoever can try again.
+    const REQUIRE_ROUTE: bool = false;
+
     // Allow async fn in trait because we don't want the user to override this function
     #[allow(async_fn_in_trait)]
-    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all, err, ret))]
-    /// Send message to rabbitmq
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all, err))]
+    /// Publish the message and report what became of it.
     ///
-    /// Returns once the broker has confirmed the message. A message that no queue is bound to
-    /// take is dropped by the broker; that is not an error.
-    async fn send(self, pool: &AmqpPool) -> Result<(), crate::error::Error> {
+    /// Waits for the broker's confirm, at most [`CONFIRM_TIMEOUT`] in all (getting a channel
+    /// included). Returns an error only when the message did not reach a queue: it was not
+    /// handed to the connection in time, the broker nacked it, the channel closed first, or
+    /// no queue took it while [`REQUIRE_ROUTE`](Self::REQUIRE_ROUTE) is set. A message that
+    /// got no confirm in time is [`PublishOutcome::Unconfirmed`]: it will most likely still
+    /// arrive, so publishing it again can deliver it twice.
+    async fn publish(self, pool: &AmqpPool) -> Result<PublishOutcome, crate::error::Error> {
+        let deadline = Instant::now() + CONFIRM_TIMEOUT;
         let bytes = self.to_bytes().map_err(|e| e.into())?;
-        let channel: Result<Pooled<ConfirmChannel, _>, crate::error::Error> =
-            pool.get().await.into();
+        let channel = tokio::time::timeout_at(deadline, pool.get())
+            .await
+            .map_err(|_| {
+                Error::AmqpError(amqprs::error::Error::ChannelUseError(format!(
+                    "no AMQP channel within {CONFIRM_TIMEOUT:?}; the message for exchange '{}' \
+                     was not published",
+                    Self::EXCHANGE
+                )))
+            })?;
+        let channel: Result<Pooled<ConfirmChannel, _>, crate::error::Error> = channel.into();
         let channel = channel?;
         let channel = channel
             .get_ref()
@@ -158,33 +240,75 @@ pub trait AmqpMessageSend: MessageSer + Send + Sized + AmqpRouting {
             .with_timestamp(unix_now())
             .finish();
         let outcome = channel
-            .publish(
+            .publish_until(
                 properties,
                 bytes.into_vec(),
                 BasicPublishArguments::new(Self::EXCHANGE, Self::ROUTING_KEY)
                     .mandatory(true)
                     .finish(),
+                Some(deadline),
             )
             .await?;
         if let PublishOutcome::Returned {
             reply_code,
             reply_text,
-        } = outcome
+        } = &outcome
+            && Self::REQUIRE_ROUTE
         {
-            #[cfg(feature = "tracing")]
-            tracing::debug!(
-                exchange = Self::EXCHANGE,
-                routing_key = Self::ROUTING_KEY,
-                reply_code,
-                reply_text,
-                "No queue is bound for the message; the broker dropped it"
-            );
-            #[cfg(not(feature = "tracing"))]
-            let _ = (reply_code, reply_text);
+            return Err(Error::AmqpError(amqprs::error::Error::ChannelUseError(
+                format!(
+                    "no queue is bound to take the message for exchange '{}', routing key '{}'; \
+                     the broker dropped it ({reply_code} {reply_text})",
+                    Self::EXCHANGE,
+                    Self::ROUTING_KEY
+                ),
+            )));
         }
 
         #[cfg(feature = "tracing-otel")]
         info!(monotonic_counter.mq_event_push = 1);
+        Ok(outcome)
+    }
+
+    // Allow async fn in trait because we don't want the user to override this function
+    #[allow(async_fn_in_trait)]
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all, err, ret))]
+    /// Send message to rabbitmq
+    ///
+    /// [`publish`](Self::publish) without the outcome. A message that no queue is bound to
+    /// take is dropped by the broker, which is not an error unless
+    /// [`REQUIRE_ROUTE`](Self::REQUIRE_ROUTE) is set. A message the broker did not confirm in
+    /// time is logged and counts as sent: it was handed to the connection, and retrying it
+    /// could deliver it twice.
+    async fn send(self, pool: &AmqpPool) -> Result<(), crate::error::Error> {
+        match self.publish(pool).await? {
+            PublishOutcome::Routed => {}
+            PublishOutcome::Returned {
+                reply_code,
+                reply_text,
+            } => {
+                #[cfg(feature = "tracing")]
+                tracing::debug!(
+                    exchange = Self::EXCHANGE,
+                    routing_key = Self::ROUTING_KEY,
+                    reply_code,
+                    reply_text,
+                    "No queue is bound for the message; the broker dropped it"
+                );
+                #[cfg(not(feature = "tracing"))]
+                let _ = (reply_code, reply_text);
+            }
+            PublishOutcome::Unconfirmed => {
+                #[cfg(feature = "tracing")]
+                tracing::warn!(
+                    exchange = Self::EXCHANGE,
+                    routing_key = Self::ROUTING_KEY,
+                    "No confirm from RabbitMQ within {CONFIRM_TIMEOUT:?} (memory or disk alarm?); \
+                     the message is delivered once the broker reads it, unless the connection \
+                     is lost first"
+                );
+            }
+        }
         Ok(())
     }
 }
@@ -255,8 +379,9 @@ pub trait AmqpMessageProcessor<Message: AmqpMessageSend + MessageDe>:
 /// Acknowledges a message once its processor succeeded. A failed message is handled as
 /// described in [`FailureAction`]: a copy goes to the queue's retry or dead-letter queue
 /// ([`retry_queue_name`], [`dead_letter_queue_name`]) and the original is acknowledged once the
-/// broker confirmed the copy. If the copy cannot be published, the original is requeued after
-/// a few seconds instead, never right away.
+/// broker confirmed the copy, however long that takes. If the broker refuses the copy, the
+/// original is requeued after a few seconds instead, never right away. If the channel closes
+/// before the copy is confirmed, the broker requeues the original.
 pub struct AmqpMessageConsumer<
     Message: AmqpMessageSend + MessageDe,
     Inner: AmqpMessageProcessor<Message>,
@@ -338,7 +463,7 @@ impl<Message: AmqpMessageSend + MessageDe, Inner: AmqpMessageProcessor<Message>>
                     );
                     Some(Destination::Retry { delay })
                 }
-                None => {
+                None if Inner::RETRY_POLICY.park_when_exhausted => {
                     #[cfg(feature = "tracing")]
                     tracing::error!(
                         queue,
@@ -350,6 +475,16 @@ impl<Message: AmqpMessageSend + MessageDe, Inner: AmqpMessageProcessor<Message>>
                     Some(Destination::DeadLetter {
                         reason: "retries-exhausted",
                     })
+                }
+                None => {
+                    #[cfg(feature = "tracing")]
+                    tracing::warn!(
+                        queue,
+                        failed_attempts,
+                        %error,
+                        "Processing failed on every attempt; dropping the message"
+                    );
+                    None
                 }
             },
         }
@@ -386,29 +521,58 @@ impl<Message: AmqpMessageSend + MessageDe, Inner: AmqpMessageProcessor<Message>>
             &error.to_string(),
             &destination,
         );
-        let published = match self
+        let confirms = match self
             .confirms
             .get_or_try_init(|| ConfirmState::attach(channel))
             .await
         {
-            Ok(confirms) => {
-                confirms
-                    .publish(
-                        channel,
-                        forwarded,
-                        content,
-                        // The default exchange routes straight to the queue of that name.
-                        BasicPublishArguments::new("", &target)
-                            .mandatory(true)
-                            .finish(),
-                    )
-                    .await
+            Ok(confirms) => confirms.clone(),
+            Err(e) => {
+                #[cfg(feature = "tracing")]
+                tracing::error!(
+                    queue,
+                    error = %e,
+                    "Could not put the channel into confirm mode; requeueing the message in {REQUEUE_DELAY:?}"
+                );
+                #[cfg(not(feature = "tracing"))]
+                let _ = e;
+                requeue_later(channel, deliver).await;
+                return;
             }
-            Err(e) => Err(e.into()),
         };
+        // The default exchange routes straight to the queue of that name.
+        let publish_copy = |content| {
+            confirms.publish(
+                channel,
+                forwarded.clone(),
+                content,
+                BasicPublishArguments::new("", &target)
+                    .mandatory(true)
+                    .finish(),
+                // No deadline: the original stays unacknowledged until the broker confirmed
+                // the copy. Requeueing the original while the broker may still take the copy
+                // would deliver the message twice.
+                None,
+            )
+        };
+        let mut published = publish_copy(content.clone()).await;
+        if let Ok(PublishOutcome::Returned { .. }) = &published {
+            // Someone deleted the queue while the consumer was running. Declare it again.
+            #[cfg(feature = "tracing")]
+            tracing::warn!(
+                queue,
+                target,
+                "Queue {target} does not exist; declaring it again"
+            );
+            published = match declare_failure_queues(channel, queue).await {
+                Ok(()) => publish_copy(content).await,
+                Err(e) => Err(e.into()),
+            };
+        }
 
         match published {
-            Ok(PublishOutcome::Routed) => {
+            // `Unconfirmed` only comes with a deadline, and there is none here.
+            Ok(PublishOutcome::Routed | PublishOutcome::Unconfirmed) => {
                 ack(
                     channel,
                     BasicAckArguments::new(deliver.delivery_tag(), false),
@@ -416,33 +580,63 @@ impl<Message: AmqpMessageSend + MessageDe, Inner: AmqpMessageProcessor<Message>>
                 )
                 .await;
             }
-            outcome => {
+            Ok(PublishOutcome::Returned { .. }) => {
                 #[cfg(feature = "tracing")]
-                match outcome {
-                    Ok(_) => tracing::error!(
-                        queue,
-                        target,
-                        "Queue {target} does not exist; requeueing the message in {REQUEUE_DELAY:?}"
-                    ),
-                    Err(e) => tracing::error!(
-                        queue,
-                        target,
-                        error = %e,
-                        "Could not move the message to {target}; requeueing it in {REQUEUE_DELAY:?}"
-                    ),
-                }
+                tracing::error!(
+                    queue,
+                    target,
+                    "Queue {target} does not exist; requeueing the message in {REQUEUE_DELAY:?}"
+                );
+                requeue_later(channel, deliver).await;
+            }
+            Err(e) if !channel.is_open() || !confirms.is_usable() => {
+                // The channel closed, or its confirms can no longer be matched to publishes, so
+                // nothing more can be acknowledged on it. Make sure it is closed: the broker
+                // requeues the original, and the consumer is set up again (see
+                // `AmqpConsumersRuntime::closed`). If the broker took the copy before, the
+                // message is processed twice.
+                #[cfg(feature = "tracing")]
+                tracing::error!(
+                    queue,
+                    target,
+                    error = %e,
+                    "The consumer channel closed before RabbitMQ confirmed the copy for {target}; the broker requeues the message"
+                );
                 #[cfg(not(feature = "tracing"))]
-                let _ = outcome;
-                tokio::time::sleep(REQUEUE_DELAY).await;
-                nack(
-                    channel,
-                    BasicNackArguments::new(deliver.delivery_tag(), false, true),
-                    5,
-                )
-                .await;
+                let _ = e;
+                if channel.is_open() {
+                    let channel = channel.clone();
+                    tokio::spawn(async move {
+                        let _ = channel.close().await;
+                    });
+                }
+            }
+            Err(e) => {
+                #[cfg(feature = "tracing")]
+                tracing::error!(
+                    queue,
+                    target,
+                    error = %e,
+                    "Could not move the message to {target}; requeueing it in {REQUEUE_DELAY:?}"
+                );
+                #[cfg(not(feature = "tracing"))]
+                let _ = e;
+                requeue_later(channel, deliver).await;
             }
         }
     }
+}
+
+/// Put a message back into its queue after [`REQUEUE_DELAY`], so that a failure that repeats
+/// does not spin.
+async fn requeue_later(channel: &Channel, deliver: &Deliver) {
+    tokio::time::sleep(REQUEUE_DELAY).await;
+    nack(
+        channel,
+        BasicNackArguments::new(deliver.delivery_tag(), false, true),
+        5,
+    )
+    .await;
 }
 
 impl<M, I> AsyncConsumer for AmqpMessageConsumer<M, I>
@@ -606,5 +800,14 @@ mod tests {
         // Small limits keep half of the channels for consumers.
         assert_eq!(max_pooled_channels(64), 32);
         assert_eq!(max_pooled_channels(1), 1);
+    }
+
+    #[test]
+    fn channels_the_broker_may_close_are_the_numbers_left_over() {
+        // 2047 numbers, 512 pooled, 128 reserved.
+        assert_eq!(channel_leak_budget(2047, 512), 1407);
+        // A pool as large as the connection allows leaves no spare number: close on the first.
+        assert_eq!(channel_leak_budget(2047, max_pooled_channels(2047)), 1);
+        assert_eq!(channel_leak_budget(64, 16), 16);
     }
 }

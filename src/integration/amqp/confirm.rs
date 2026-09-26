@@ -8,18 +8,23 @@ use amqprs::{Ack, BasicProperties, Cancel, CloseChannel, Nack, Return};
 use async_trait::async_trait;
 use std::collections::BTreeMap;
 use std::ops::Deref;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 use tokio::sync::oneshot;
+use tokio::time::Instant;
 
-/// How long a publish waits for the broker's confirm before it counts as failed.
+/// How long [`AmqpMessageSend::send`](super::AmqpMessageSend::send) and
+/// [`ConfirmChannel::publish`] wait for the broker. Past it, a message that was already handed
+/// to the connection is reported as [`PublishOutcome::Unconfirmed`], and one that was not is an
+/// error.
 pub const CONFIRM_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// What the broker did with a published message it confirmed.
+/// What became of a published message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PublishOutcome {
-    /// At least one queue took the message. For a persistent message on a durable queue the
-    /// broker confirms only once the message is on disk.
+    /// The broker confirmed it and at least one queue took it. For a persistent message on a
+    /// durable queue the broker confirms only once the message is on disk.
     Routed,
     /// The message was published as `mandatory` but no queue was bound to take it. The broker
     /// returned it and it is gone.
@@ -29,6 +34,13 @@ pub enum PublishOutcome {
         /// The broker's explanation.
         reply_text: String,
     },
+    /// The message was handed to the connection, but the broker did not confirm it in time,
+    /// typically because a memory or disk alarm made it stop reading from publishing
+    /// connections.
+    ///
+    /// The outcome is unknown, not failed: the broker takes the message once it reads it
+    /// again, unless the connection is lost first. Publishing it again can deliver it twice.
+    Unconfirmed,
 }
 
 enum Confirmation {
@@ -43,11 +55,54 @@ struct Tracker {
     /// once the channel is in confirm mode.
     last_seq: u64,
     pending: BTreeMap<u64, oneshot::Sender<Confirmation>>,
-    /// A `basic.return` for the publish in flight. The broker sends it before that publish's
-    /// `basic.ack`.
+    /// A `basic.return` waiting for the confirm that follows it. The broker sends a return
+    /// right before the confirm of the same message.
     returned: Option<(u16, String)>,
     /// Set once the channel closed, or once its callback was replaced or dropped.
     closed: Option<String>,
+}
+
+/// Counts the channels the broker closed on one connection.
+///
+/// amqprs frees a channel number only when the client closes the channel. A channel the broker
+/// closed (for example after a publish to an exchange that does not exist) keeps its number for
+/// as long as the connection lives, and once every number is taken amqprs cannot open channels
+/// any more while the connection still reports itself open. [`AmqpPool`](super::AmqpPool)
+/// closes the connection before that happens, so the application sees a lost connection.
+pub(crate) struct ChannelLeaks {
+    closed_by_broker: AtomicUsize,
+    /// How many channels the broker may close before the connection has to go.
+    budget: usize,
+    closing: AtomicBool,
+}
+
+impl ChannelLeaks {
+    pub(crate) fn new(budget: usize) -> Self {
+        Self {
+            closed_by_broker: AtomicUsize::new(0),
+            budget,
+            closing: AtomicBool::new(false),
+        }
+    }
+
+    fn record(&self) {
+        self.closed_by_broker.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// `Some(count)` once the broker closed `budget` channels.
+    pub(crate) fn exhausted(&self) -> Option<usize> {
+        let count = self.closed_by_broker.load(Ordering::Relaxed);
+        (count >= self.budget).then_some(count)
+    }
+
+    /// `true` for the first caller only.
+    pub(crate) fn start_closing(&self) -> bool {
+        !self.closing.swap(true, Ordering::Relaxed)
+    }
+
+    pub(crate) fn budget(&self) -> usize {
+        self.budget
+    }
 }
 
 /// Confirm bookkeeping for one channel, shared with the callback registered on it.
@@ -64,6 +119,14 @@ impl ConfirmState {
     /// must go through [`publish`](Self::publish) from then on: a publish that bypasses it
     /// shifts the broker's numbering, and the channel is marked unusable once that shows.
     pub(crate) async fn attach(channel: &Channel) -> Result<Arc<Self>, amqprs::error::Error> {
+        Self::attach_counting(channel, None).await
+    }
+
+    /// Like [`attach`](Self::attach), and counts the channel in `leaks` if the broker closes it.
+    pub(crate) async fn attach_counting(
+        channel: &Channel,
+        leaks: Option<Arc<ChannelLeaks>>,
+    ) -> Result<Arc<Self>, amqprs::error::Error> {
         let state = Arc::new(Self {
             tracker: Mutex::default(),
             publish_lock: tokio::sync::Mutex::new(()),
@@ -71,6 +134,7 @@ impl ConfirmState {
         channel
             .register_callback(ConfirmCallback {
                 state: state.clone(),
+                leaks,
             })
             .await?;
         channel
@@ -90,61 +154,86 @@ impl ConfirmState {
     }
 
     /// Publish on `channel` and wait for the broker's confirm.
+    ///
+    /// With a `deadline`, a message that is not handed to the connection by then is an error
+    /// (it was not published), and one that is but gets no confirm by then is
+    /// [`PublishOutcome::Unconfirmed`]. Without one, it waits until the broker confirms the
+    /// message or the channel closes, and never returns `Unconfirmed`.
     pub(crate) async fn publish(
         &self,
         channel: &Channel,
         properties: BasicProperties,
         content: Vec<u8>,
         args: BasicPublishArguments,
+        deadline: Option<Instant>,
     ) -> Result<PublishOutcome, Error> {
-        let _in_flight = self.publish_lock.lock().await;
-        let (tx, rx) = oneshot::channel();
-        let seq = {
-            let mut tracker = self.tracker();
-            if let Some(reason) = &tracker.closed {
-                return Err(amqp_error(format!("channel is unusable: {reason}")));
-            }
-            tracker.last_seq += 1;
-            tracker.returned = None;
-            let seq = tracker.last_seq;
-            tracker.pending.insert(seq, tx);
-            seq
+        let target = format!(
+            "exchange '{}', routing key '{}'",
+            args.exchange, args.routing_key
+        );
+
+        let hand_over = async {
+            let in_flight = self.publish_lock.lock().await;
+            let (seq, rx) = {
+                let mut tracker = self.tracker();
+                if let Some(reason) = &tracker.closed {
+                    return Err(amqp_error(format!("channel is unusable: {reason}")));
+                }
+                tracker.last_seq += 1;
+                let seq = tracker.last_seq;
+                let (tx, rx) = oneshot::channel();
+                tracker.pending.insert(seq, tx);
+                (seq, rx)
+            };
+            // Until `basic_publish` succeeds, the frame has not reached the connection's
+            // outgoing queue and the broker will not count it. When it fails, or when this
+            // future is dropped meanwhile (a caller's timeout, a client that went away), the
+            // tracker must forget the publish too, or every later confirm on this channel
+            // would be matched to the publish before it.
+            let unsent = Unsent { state: self, seq };
+            channel.basic_publish(properties, content, args).await?;
+            unsent.disarm();
+            Ok((in_flight, seq, rx))
+        };
+        let (_in_flight, seq, rx) = match deadline {
+            Some(deadline) => tokio::time::timeout_at(deadline, hand_over)
+                .await
+                .map_err(|_| {
+                    amqp_error(format!(
+                        "the message for {target} was not handed to the connection in time, so it was not published"
+                    ))
+                })??,
+            None => hand_over.await?,
         };
 
-        let exchange = args.exchange.clone();
-        let routing_key = args.routing_key.clone();
-        if let Err(e) = channel.basic_publish(properties, content, args).await {
-            // The frame never left, so the broker did not count it either.
-            let mut tracker = self.tracker();
-            tracker.pending.remove(&seq);
-            tracker.last_seq -= 1;
-            return Err(e.into());
-        }
-
-        match tokio::time::timeout(CONFIRM_TIMEOUT, rx).await {
-            Ok(Ok(Confirmation::Ack { returned: None })) => Ok(PublishOutcome::Routed),
-            Ok(Ok(Confirmation::Ack {
+        let confirmation = match deadline {
+            Some(deadline) => match tokio::time::timeout_at(deadline, rx).await {
+                Ok(confirmation) => confirmation,
+                Err(_) => {
+                    // A late confirm for this sequence number finds no waiter and is ignored.
+                    self.tracker().pending.remove(&seq);
+                    return Ok(PublishOutcome::Unconfirmed);
+                }
+            },
+            None => rx.await,
+        };
+        match confirmation {
+            Ok(Confirmation::Ack { returned: None }) => Ok(PublishOutcome::Routed),
+            Ok(Confirmation::Ack {
                 returned: Some((reply_code, reply_text)),
-            })) => Ok(PublishOutcome::Returned {
+            }) => Ok(PublishOutcome::Returned {
                 reply_code,
                 reply_text,
             }),
-            Ok(Ok(Confirmation::Nack)) => Err(amqp_error(format!(
-                "the broker refused (nacked) the message for exchange '{exchange}', routing key '{routing_key}'"
+            Ok(Confirmation::Nack) => Err(amqp_error(format!(
+                "the broker refused (nacked) the message for {target}"
             ))),
-            Ok(Ok(Confirmation::Closed(reason))) => Err(amqp_error(format!(
-                "channel closed before the broker confirmed the message for exchange '{exchange}', routing key '{routing_key}': {reason}"
+            Ok(Confirmation::Closed(reason)) => Err(amqp_error(format!(
+                "channel closed before the broker confirmed the message for {target}: {reason}"
             ))),
-            Ok(Err(_)) => Err(amqp_error(
-                "channel closed before the broker confirmed the message".to_string(),
-            )),
-            Err(_) => {
-                // A late confirm for this sequence number is ignored.
-                self.tracker().pending.remove(&seq);
-                Err(amqp_error(format!(
-                    "no confirm from the broker within {CONFIRM_TIMEOUT:?} for exchange '{exchange}', routing key '{routing_key}'"
-                )))
-            }
+            Err(_) => Err(amqp_error(format!(
+                "channel closed before the broker confirmed the message for {target}"
+            ))),
         }
     }
 
@@ -156,12 +245,11 @@ impl ConfirmState {
             return;
         }
         let last_seq = tracker.last_seq;
-        // A return belongs to the publish in flight; keep it until that one is confirmed.
-        let returned = if delivery_tag == last_seq {
-            tracker.returned.take()
-        } else {
-            None
-        };
+        // The return, if any, belongs to the message confirmed now. That is the publish in
+        // flight when this confirms the last sequence number; otherwise it is an earlier
+        // publish that stopped waiting (`Unconfirmed`), and the return must not be pinned on
+        // the one after it.
+        let returned = tracker.returned.take().filter(|_| delivery_tag == last_seq);
         let confirmed = if multiple {
             let rest = tracker.pending.split_off(&(delivery_tag + 1));
             std::mem::replace(&mut tracker.pending, rest)
@@ -189,6 +277,34 @@ impl ConfirmState {
     }
 }
 
+/// Takes a publish's sequence number back unless the publish reached the connection.
+struct Unsent<'a> {
+    state: &'a ConfirmState,
+    seq: u64,
+}
+
+impl Unsent<'_> {
+    /// The frame is in the connection's outgoing queue: keep the sequence number.
+    fn disarm(self) {
+        std::mem::forget(self);
+    }
+}
+
+impl Drop for Unsent<'_> {
+    fn drop(&mut self) {
+        // amqprs sends the whole publish with a single `send` on a tokio mpsc, which enqueues
+        // nothing when it fails or is dropped. `publish_lock` is still held, so no other publish
+        // took a sequence number after this one.
+        let mut tracker = self.state.tracker();
+        tracker.pending.remove(&self.seq);
+        if tracker.last_seq == self.seq {
+            tracker.last_seq -= 1;
+        } else {
+            tracker.close("a cancelled publish left the confirm numbering unknown".to_string());
+        }
+    }
+}
+
 impl Tracker {
     fn close(&mut self, reason: String) {
         for (_, waiter) in std::mem::take(&mut self.pending) {
@@ -205,6 +321,7 @@ fn amqp_error(message: String) -> Error {
 /// The callback that feeds a channel's confirms, returns and close into its [`ConfirmState`].
 struct ConfirmCallback {
     state: Arc<ConfirmState>,
+    leaks: Option<Arc<ChannelLeaks>>,
 }
 
 impl Drop for ConfirmCallback {
@@ -233,6 +350,9 @@ impl ChannelCallback for ConfirmCallback {
         );
         #[cfg(not(feature = "tracing"))]
         let _ = channel;
+        if let Some(leaks) = &self.leaks {
+            leaks.record();
+        }
         self.state.tracker().close(format!(
             "closed by the broker: {} {}",
             close.reply_code(),
@@ -241,6 +361,10 @@ impl ChannelCallback for ConfirmCallback {
         Ok(())
     }
 
+    /// The broker cancelled a consumer on this channel, usually because its queue was deleted.
+    /// Nothing is delivered to it any more, but the channel stays open. Close the channel, so
+    /// that [`AmqpConsumersRuntime::closed`](crate::services::amqp_consumer::AmqpConsumersRuntime::closed)
+    /// reports the consumer as gone and the service can set it up again.
     async fn cancel(
         &mut self,
         channel: &Channel,
@@ -250,10 +374,16 @@ impl ChannelCallback for ConfirmCallback {
         tracing::error!(
             channel = %channel,
             consumer_tag = %cancel.consumer_tag(),
-            "RabbitMQ cancelled the consumer (was its queue deleted?)"
+            "RabbitMQ cancelled the consumer (was its queue deleted?); closing its channel"
         );
         #[cfg(not(feature = "tracing"))]
-        let _ = (channel, cancel);
+        let _ = cancel;
+        // The close handshake goes through this channel's dispatcher, which is busy running
+        // this callback: close from another task.
+        let channel = channel.clone();
+        tokio::spawn(async move {
+            let _ = channel.close().await;
+        });
         Ok(())
     }
 
@@ -302,6 +432,16 @@ impl ConfirmChannel {
         Self::attach(channel).await
     }
 
+    /// Like [`open`](Self::open), and counts the channel in `leaks` if the broker closes it.
+    pub(crate) async fn open_counting(
+        connection: &Connection,
+        leaks: Arc<ChannelLeaks>,
+    ) -> Result<Self, amqprs::error::Error> {
+        let channel = connection.open_channel(None).await?;
+        let state = ConfirmState::attach_counting(&channel, Some(leaks)).await?;
+        Ok(Self { channel, state })
+    }
+
     /// Put an open channel that nothing has published on into confirm mode.
     ///
     /// Replaces any callback registered on the channel.
@@ -315,19 +455,38 @@ impl ConfirmChannel {
         self.channel.is_open() && self.state.is_usable()
     }
 
-    /// Publish a message and wait until the broker confirms it (at most [`CONFIRM_TIMEOUT`]).
+    /// Publish a message and wait until the broker confirms it, at most [`CONFIRM_TIMEOUT`].
     ///
-    /// Returns an error when the broker nacks the message, when the channel closes first
-    /// (for example because the exchange does not exist) or on timeout. A `mandatory` message
-    /// that no queue takes is confirmed as [`PublishOutcome::Returned`].
+    /// Returns an error when the message did not reach the broker: it was not handed to the
+    /// connection within [`CONFIRM_TIMEOUT`], the broker nacked it, or the channel closed
+    /// first (for example because the exchange does not exist). A `mandatory` message that no
+    /// queue takes is [`PublishOutcome::Returned`], and one the broker did not confirm in time
+    /// is [`PublishOutcome::Unconfirmed`].
     pub async fn publish(
         &self,
         properties: BasicProperties,
         content: Vec<u8>,
         args: BasicPublishArguments,
     ) -> Result<PublishOutcome, Error> {
+        self.publish_until(
+            properties,
+            content,
+            args,
+            Some(Instant::now() + CONFIRM_TIMEOUT),
+        )
+        .await
+    }
+
+    /// [`publish`](Self::publish) with the given deadline, or without one.
+    pub(crate) async fn publish_until(
+        &self,
+        properties: BasicProperties,
+        content: Vec<u8>,
+        args: BasicPublishArguments,
+        deadline: Option<Instant>,
+    ) -> Result<PublishOutcome, Error> {
         self.state
-            .publish(&self.channel, properties, content, args)
+            .publish(&self.channel, properties, content, args, deadline)
             .await
     }
 
