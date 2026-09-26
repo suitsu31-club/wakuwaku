@@ -14,11 +14,19 @@
 //! 2. opens a **dedicated** channel from the pool's factory (not a pooled
 //!    channel), declares the durable queue [`AmqpMessageProcessor::QUEUE`],
 //!    and binds it to the exchange with the event's routing key,
-//! 3. starts consuming with manual ack ([`setup_consumer`]).
+//! 3. declares the queue's retry and dead-letter queues, limits the prefetch
+//!    to [`AmqpMessageProcessor::PREFETCH`] and starts consuming with manual
+//!    ack ([`setup_consumer`]). What happens to a message whose processing
+//!    fails is described in
+//!    [`FailureAction`](crate::integration::amqp::FailureAction).
 //!
 //! The returned [`AmqpConsumersRuntime`] owns those channels. amqprs closes a
 //! channel when it is dropped, so **dropping the runtime stops every consumer**.
 //! Keep it alive for as long as the service should consume.
+//!
+//! A channel the broker or the network closed does not come back, and neither
+//! does its consumer. [`AmqpConsumersRuntime::closed`] tells when that
+//! happened, so the service can exit and be restarted.
 //!
 //! # Example
 //!
@@ -493,4 +501,21 @@ where
 pub struct AmqpConsumersRuntime<Reg> {
     _register: Reg,
     _channels: LinkedList<amqprs::channel::Channel>,
+}
+
+impl<Reg> AmqpConsumersRuntime<Reg> {
+    /// Resolves once any consumer channel has closed, for example because the
+    /// connection to the broker was lost or the broker closed the channel.
+    ///
+    /// The consumer on that channel has stopped for good. Restart the
+    /// consumers, or exit and let a supervisor restart the process.
+    pub async fn closed(&self) {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
+        loop {
+            tick.tick().await;
+            if self._channels.iter().any(|channel| !channel.is_open()) {
+                return;
+            }
+        }
+    }
 }
