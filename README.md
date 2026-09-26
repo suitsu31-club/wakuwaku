@@ -39,8 +39,8 @@ wakuwaku = { version = "0.1", default-features = false, features = ["redis"] }
 
 ## Module overview
 
-- `wakuwaku::amqp`  
-  Traits and utilities for exchange/queue setup, message sending, and consumer wiring.
+- `wakuwaku::integration::amqp`  
+  Traits and utilities for exchange/queue setup, message sending, and consumer wiring. Messages are published persistent and `send` waits for the broker's publisher confirm; the channel pool stays below the connection's `channel_max`. A consumer retries a failed message later with a growing delay (through a `<queue>.retry` queue) and parks it in `<queue>.dlq` once its attempts run out or the error cannot be fixed by retrying; see `FailureAction` and `RetryPolicy`.
 - `wakuwaku::redis`  
   `KeyValue`/`KeyValueRead`/`KeyValueWrite` traits for typed Redis get/set/delete with binary payloads.
 - `wakuwaku::sqlx`  
