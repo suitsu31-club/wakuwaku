@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      rabbitmq:
+        image: rabbitmq:4.2-alpine
+        env:
+          RABBITMQ_DEFAULT_USER: wakuwaku
+          RABBITMQ_DEFAULT_PASS: wakuwaku
+        ports:
+          - 5672:5672
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping"
+          --health-interval 5s
+          --health-timeout 10s
+          --health-retries 30
+    env:
+      WAKUWAKU_TEST_AMQP_URL: amqp://wakuwaku:wakuwaku@localhost:5672
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --check
+
+      - name: Clippy (default features)
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Clippy (amqprs only, no tracing)
+        run: cargo clippy --all-targets --no-default-features --features amqprs -- -D warnings
+
+      - name: Clippy (sqlx, tonic, tracing-otel)
+        run: cargo clippy --all-targets --features sqlx,tonic,tracing-otel -- -D warnings
+
+      - name: Test
+        run: cargo test --features sqlx,tonic,tracing-otel
