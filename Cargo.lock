@@ -85,7 +85,6 @@ dependencies = [
  "serde",
  "serde_bytes",
  "tokio",
- "uriparse",
 ]
 
 [[package]]
@@ -4883,16 +4882,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
-name = "uriparse"
-version = "0.6.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0200d0fc04d809396c2ad43f3c95da3582a2556eba8d453c1087f4120ee352ff"
-dependencies = [
- "fnv",
- "lazy_static",
-]
-
-[[package]]
 name = "url"
 version = "2.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4954,11 +4943,10 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "wakuwaku"
-version = "0.3.1"
+version = "0.3.0"
 dependencies = [
  "amqprs",
  "anyhow",
- "async-trait",
  "crossbeam-queue",
  "kanau",
  "redis",
