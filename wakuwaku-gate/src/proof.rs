@@ -68,8 +68,8 @@ pub struct And<A, B>(PhantomData<(A, B)>);
 impl<T, A: Predicate<T>, B: Predicate<T>> Predicate<T> for And<A, B>
 where
     A::Ctx: Sync + Clone,
-    B::Ctx: From<A::Ctx> + Sync,
-    <B::Ctx as ValidateContext>::IoError: Into<PredicateError<A, T>> + Send + Sync,
+    B::Ctx: From<A::Ctx> + Send + Sync,
+    <B::Ctx as ValidateContext>::IoError: Into<<A::Ctx as ValidateContext>::IoError> + Send + Sync,
     A: Sync,
     T: Sync,
 {
@@ -87,7 +87,12 @@ where
             }
             CheckOrder::Sequential => {
                 A::check(s, ctx, CheckOrder::Sequential).await?;
-                B::check(s, &ctx_b, CheckOrder::Sequential).await?;
+                B::check(s, &ctx_b, CheckOrder::Sequential)
+                    .await
+                    .map_err(|e| match e {
+                        ValidateError::Deny(s) => ValidateError::Deny(s),
+                        ValidateError::IoError(e) => ValidateError::IoError(e.into()),
+                    })?;
                 Ok(())
             }
         }
