@@ -181,7 +181,8 @@ type PredicateError<P, T> = ValidateError<<<P as Predicate<T>>::Ctx as ValidateC
 /// Evidence that predicate `P` held for the wrapped subject.
 ///
 /// The field is private. Outside this module a `Proven` can only come from [`prove`],
-/// or from an existing proof via [`Proven::from_a`] / [`Proven::from_b`].
+/// or from an existing proof via [`Proven::from_a`] / [`Proven::from_b`] (for [`Or`])
+/// or [`Proven::from_both`] / [`Proven::into_a`] / [`Proven::into_b`] (for [`And`]).
 ///
 /// The subject is owned and only exposed through `&T`, so it cannot be mutated after
 /// the check (interior mutability excepted). The evidence reflects the moment of the
@@ -231,7 +232,60 @@ pub async fn prove<T, P: Predicate<T>>(
 ///   `B` is not run.
 /// - [`CheckOrder::Parallel`]: both run to completion. If both fail, `A`'s error is
 ///   returned and `B`'s is discarded.
+///
+/// Proofs of both operands about equal subjects combine into a proof of the
+/// conjunction with [`Proven::from_both`]. A proof of the conjunction can be weakened
+/// to a proof of either operand without rechecking: see [`Proven::into_a`] and
+/// [`Proven::into_b`].
 pub struct And<A, B>(PhantomData<(A, B)>);
+
+impl<T: Eq, A, B> Proven<T, And<A, B>> {
+    /// `A` and `B` held for equal subjects, so `A ∧ B` holds.
+    ///
+    /// The subjects are compared with [`Eq`]; the result keeps `a`'s subject and drops
+    /// `b`'s.
+    ///
+    /// This is only as sound as `T`'s [`Eq`]: if two values compare equal yet a
+    /// predicate distinguishes them (a custom `Eq` that ignores a field `B` inspects,
+    /// for instance), the resulting proof may not hold for the kept subject.
+    ///
+    /// # Errors
+    ///
+    /// Returns both proofs unchanged if the subjects differ.
+    pub fn from_both(
+        a: Proven<T, A>,
+        b: Proven<T, B>,
+    ) -> Result<Self, Mismatched<T, A, B>> {
+        if a.subject != b.subject {
+            return Err((a, b));
+        }
+        Ok(Proven {
+            subject: a.subject,
+            _p: PhantomData,
+        })
+    }
+}
+
+/// Both proofs handed back by [`Proven::from_both`] when their subjects differ.
+type Mismatched<T, A, B> = (Proven<T, A>, Proven<T, B>);
+
+impl<T, A, B> Proven<T, And<A, B>> {
+    /// `A ∧ B` held for the subject, so `A` holds.
+    pub fn into_a(self) -> Proven<T, A> {
+        Proven {
+            subject: self.subject,
+            _p: PhantomData,
+        }
+    }
+
+    /// `A ∧ B` held for the subject, so `B` holds.
+    pub fn into_b(self) -> Proven<T, B> {
+        Proven {
+            subject: self.subject,
+            _p: PhantomData,
+        }
+    }
+}
 
 impl<T, A: Predicate<T>, B: Predicate<T>> Predicate<T> for And<A, B>
 where
