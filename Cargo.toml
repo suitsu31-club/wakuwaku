@@ -1,45 +1,9 @@
-[package]
-name = "wakuwaku"
-version = "0.3.0"
+[workspace]
+resolver = "3"
+members = ["wakuwaku"]
+
+[workspace.package]
 edition = "2024"
-description = "Async backend utilities for RabbitMQ, SQLx, Redis, and pooled resources"
 license = "MIT"
-readme = "README.md"
 repository = "https://github.com/suitsu31-club/wakuwaku"
 homepage = "https://github.com/suitsu31-club/wakuwaku"
-documentation = "https://docs.rs/wakuwaku"
-keywords = ["async", "rabbitmq", "redis", "sqlx", "microservice"]
-
-[dependencies]
-thiserror = "2.0"
-anyhow = "1"
-kanau = { version = "0.6", features = ["message"] }
-amqprs = { version = "2.1", optional = true }
-sqlx = { version = "0.9", features = [
-    "runtime-tokio",
-    "tls-rustls",
-    "postgres",
-    "time",
-    "derive",
-    "macros",
-    "uuid",
-    "rust_decimal",
-    "json",
-], optional = true }
-surrealdb = { version = "3.2", optional = true }
-uuid = { version = "1", optional = true }
-redis = { version = "1.0", features = ["tokio-comp", "uuid", "json"], optional = true }
-tonic = { version = "0.14", optional = true }
-crossbeam-queue = "0.3"
-tokio = "1"
-tracing = { version = "0.1", optional = true }
-time = "0.3"
-
-[features]
-default = ["amqprs", "redis", "uuid", "tracing"]
-sqlx = ["dep:sqlx"]
-surreal = ["dep:surrealdb"]
-tracing-otel = ["tracing"]
-
-[package.metadata.docs.rs]
-all-features = true
