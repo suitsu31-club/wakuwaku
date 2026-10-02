@@ -11,6 +11,10 @@
 //! Predicates compose with [`And`] and [`Or`]. Both evaluate their operands in the
 //! [`CheckOrder`] passed to [`prove`], and forward that order to nested predicates.
 //!
+//! A proof converts into a proof of an equivalent or weaker proposition without
+//! rechecking through [`TermDerive`] / [`Proven::derive`], which implement the laws
+//! of Boolean algebra over [`And`] and [`Or`] (commutativity, associativity, …).
+//!
 //! # Contexts and errors
 //!
 //! Every predicate names a [`ValidateContext`] (`Predicate::Ctx`) holding whatever
@@ -181,8 +185,9 @@ type PredicateError<P, T> = ValidateError<<<P as Predicate<T>>::Ctx as ValidateC
 /// Evidence that predicate `P` held for the wrapped subject.
 ///
 /// The field is private. Outside this module a `Proven` can only come from [`prove`],
-/// or from an existing proof via [`Proven::from_a`] / [`Proven::from_b`] (for [`Or`])
-/// or [`Proven::from_both`] / [`Proven::into_a`] / [`Proven::into_b`] (for [`And`]).
+/// or from an existing proof via [`Proven::from_a`] / [`Proven::from_b`] (for [`Or`]),
+/// [`Proven::from_both`] / [`Proven::into_a`] / [`Proven::into_b`] (for [`And`]), or
+/// [`Proven::derive`] (see [`TermDerive`]).
 ///
 /// The subject is owned and only exposed through `&T`, so it cannot be mutated after
 /// the check (interior mutability excepted). The evidence reflects the moment of the
@@ -199,6 +204,27 @@ impl<T, P> Proven<T, P> {
     /// The validated subject.
     pub fn subject(&self) -> &T {
         &self.subject
+    }
+
+    /// Converts this into a proof of `Q` along the law `R`, without rechecking.
+    ///
+    /// `R` is normally inferred: write `proof.derive::<Q, _>()`, or just
+    /// `proof.derive()` where the target type is known. See [`TermDerive`].
+    pub fn derive<Q, R>(self) -> Proven<T, Q>
+    where
+        P: TermDerive<Q, T, R>,
+    {
+        P::term_derive(self)
+    }
+
+    /// Relabels the proof as `Q` without checking anything.
+    ///
+    /// Private on purpose: every caller must justify that `P` implies `Q`.
+    fn relabel<Q>(self) -> Proven<T, Q> {
+        Proven {
+            subject: self.subject,
+            _p: PhantomData,
+        }
     }
 }
 
@@ -400,5 +426,288 @@ where
                 }
             }
         }
+    }
+}
+
+/// A law of inference: whenever `Self` holds for a subject, `P` holds for it too.
+///
+/// [`term_derive`](Self::term_derive) turns a proof of `Self` into a proof of `P`
+/// without rechecking, so it performs no I/O and cannot fail. [`Proven::derive`] is
+/// the method-call form. The derived proof is about the same subject at the same
+/// moment as the original, with the same caveats (see [`Proven`]).
+///
+/// `R` names the law that justifies the step. Without it, laws would be overlapping
+/// impls of one trait: [`Commute`] and [`Associate`] both rewrite `(A ∧ A) ∧ A` into
+/// `A ∧ (A ∧ A)`, which Rust rejects. `R` is normally inferred from the source and
+/// target types; when more than one law fits, as in that example, name it:
+/// `proof.derive::<_, Associate>()`.
+///
+/// # Provided laws
+///
+/// `∧` is [`And`] and `∨` is [`Or`]. Every `⇔` is two impls, one per direction.
+///
+/// | `R`             | Laws                                                                 |
+/// |-----------------|----------------------------------------------------------------------|
+/// | [`Commute`]     | `A ∧ B ⇒ B ∧ A`, `A ∨ B ⇒ B ∨ A`                                     |
+/// | [`Associate`]   | `(A ∧ B) ∧ C ⇔ A ∧ (B ∧ C)`, `(A ∨ B) ∨ C ⇔ A ∨ (B ∨ C)`             |
+/// | [`Idempotence`] | `A ∧ A ⇔ A`, `A ∨ A ⇔ A`                                             |
+/// | [`Absorb`]      | `A ∧ (A ∨ B) ⇔ A`, `A ∨ (A ∧ B) ⇔ A`                                 |
+/// | [`Distribute`]  | `A ∧ (B ∨ C) ⇔ (A ∧ B) ∨ (A ∧ C)`, `A ∨ (B ∧ C) ⇔ (A ∨ B) ∧ (A ∨ C)` |
+///
+/// There is no negation predicate, so laws involving complement are absent.
+/// Elimination (`A ∧ B ⇒ A`) and introduction (`A ⇒ A ∨ B`; `A`, `B` ⇒ `A ∧ B`) are
+/// the inherent methods [`Proven::into_a`], [`Proven::into_b`], [`Proven::from_a`],
+/// [`Proven::from_b`] and [`Proven::from_both`]. Laws rewrite the whole proposition
+/// only; there is no rule for rewriting inside an operand.
+///
+/// `Self` must itself be a [`Predicate<T>`], so a law applies only where the source
+/// proposition implements [`Predicate<T>`], i.e. where its operands' contexts are
+/// compatible (see [`And`] and [`Or`]). The target need not be checkable.
+///
+/// # Implementing
+///
+/// `term_derive` must return a [`Proven<T, P>`], which outside this module can only be
+/// obtained from [`prove`] or by transforming existing proofs. An implementation
+/// therefore cannot fabricate evidence, and adding laws for your own predicates is
+/// sound. Give each new law its own rule type for `R`.
+///
+/// # Example
+///
+/// ```
+/// use std::convert::Infallible;
+/// use wakuwaku_gate::proof::{
+///     And, CheckOrder, DeniedReason, Or, Predicate, Proven, ValidateContext, ValidateError,
+///     prove,
+/// };
+///
+/// #[derive(Clone)]
+/// struct NoCtx;
+///
+/// impl ValidateContext for NoCtx {
+///     type IoError = Infallible;
+/// }
+///
+/// static ODD: DeniedReason = DeniedReason("odd");
+/// static LARGE: DeniedReason = DeniedReason("large");
+/// static ZERO: DeniedReason = DeniedReason("zero");
+///
+/// fn decide(holds: bool, reason: DeniedReason) -> Result<(), ValidateError<Infallible>> {
+///     if holds { Ok(()) } else { Err(ValidateError::Deny(reason)) }
+/// }
+///
+/// struct Even;
+/// struct Small;
+/// struct Positive;
+///
+/// impl Predicate<u32> for Even {
+///     type Ctx = NoCtx;
+///     async fn check(n: &u32, _: &NoCtx, _: CheckOrder) -> Result<(), ValidateError<Infallible>> {
+///         decide(n % 2 == 0, ODD)
+///     }
+/// }
+///
+/// impl Predicate<u32> for Small {
+///     type Ctx = NoCtx;
+///     async fn check(n: &u32, _: &NoCtx, _: CheckOrder) -> Result<(), ValidateError<Infallible>> {
+///         decide(*n < 100, LARGE)
+///     }
+/// }
+///
+/// impl Predicate<u32> for Positive {
+///     type Ctx = NoCtx;
+///     async fn check(n: &u32, _: &NoCtx, _: CheckOrder) -> Result<(), ValidateError<Infallible>> {
+///         decide(*n > 0, ZERO)
+///     }
+/// }
+///
+/// // Downstream code states its requirement in its own shape.
+/// fn accept(n: Proven<u32, Or<And<Even, Positive>, And<Even, Small>>>) -> u32 {
+///     *n.subject()
+/// }
+///
+/// # #[tokio::main(flavor = "current_thread")]
+/// # async fn main() {
+/// let Ok(n) = prove::<_, And<Even, Or<Small, Positive>>>(42, &NoCtx, CheckOrder::Sequential).await
+/// else {
+///     unreachable!()
+/// };
+///
+/// // Even ∧ (Small ∨ Positive) ⇒ (Even ∧ Small) ∨ (Even ∧ Positive), by `Distribute`.
+/// let n = n.derive::<Or<And<Even, Small>, And<Even, Positive>>, _>();
+/// // ⇒ (Even ∧ Positive) ∨ (Even ∧ Small), by `Commute`; the target is inferred.
+/// assert_eq!(accept(n.derive()), 42);
+/// # }
+/// ```
+pub trait TermDerive<P, T, R>: Predicate<T> + Sized {
+    /// `Self` held for the subject, so `P` holds for it.
+    fn term_derive(proof: Proven<T, Self>) -> Proven<T, P>;
+}
+
+/// Commutativity: `A ∧ B ⇒ B ∧ A` and `A ∨ B ⇒ B ∨ A`. See [`TermDerive`].
+pub enum Commute {}
+
+impl<T, A, B> TermDerive<And<B, A>, T, Commute> for And<A, B>
+where
+    Self: Predicate<T>,
+{
+    fn term_derive(proof: Proven<T, Self>) -> Proven<T, And<B, A>> {
+        proof.relabel()
+    }
+}
+
+impl<T, A, B> TermDerive<Or<B, A>, T, Commute> for Or<A, B>
+where
+    Self: Predicate<T>,
+{
+    fn term_derive(proof: Proven<T, Self>) -> Proven<T, Or<B, A>> {
+        proof.relabel()
+    }
+}
+
+/// Associativity: `(A ∧ B) ∧ C ⇔ A ∧ (B ∧ C)` and `(A ∨ B) ∨ C ⇔ A ∨ (B ∨ C)`. See
+/// [`TermDerive`].
+pub enum Associate {}
+
+impl<T, A, B, C> TermDerive<And<A, And<B, C>>, T, Associate> for And<And<A, B>, C>
+where
+    Self: Predicate<T>,
+{
+    fn term_derive(proof: Proven<T, Self>) -> Proven<T, And<A, And<B, C>>> {
+        proof.relabel()
+    }
+}
+
+impl<T, A, B, C> TermDerive<And<And<A, B>, C>, T, Associate> for And<A, And<B, C>>
+where
+    Self: Predicate<T>,
+{
+    fn term_derive(proof: Proven<T, Self>) -> Proven<T, And<And<A, B>, C>> {
+        proof.relabel()
+    }
+}
+
+impl<T, A, B, C> TermDerive<Or<A, Or<B, C>>, T, Associate> for Or<Or<A, B>, C>
+where
+    Self: Predicate<T>,
+{
+    fn term_derive(proof: Proven<T, Self>) -> Proven<T, Or<A, Or<B, C>>> {
+        proof.relabel()
+    }
+}
+
+impl<T, A, B, C> TermDerive<Or<Or<A, B>, C>, T, Associate> for Or<A, Or<B, C>>
+where
+    Self: Predicate<T>,
+{
+    fn term_derive(proof: Proven<T, Self>) -> Proven<T, Or<Or<A, B>, C>> {
+        proof.relabel()
+    }
+}
+
+/// Idempotence: `A ∧ A ⇔ A` and `A ∨ A ⇔ A`. See [`TermDerive`].
+pub enum Idempotence {}
+
+impl<T, A> TermDerive<A, T, Idempotence> for And<A, A>
+where
+    Self: Predicate<T>,
+{
+    fn term_derive(proof: Proven<T, Self>) -> Proven<T, A> {
+        proof.relabel()
+    }
+}
+
+impl<T, A: Predicate<T>> TermDerive<And<A, A>, T, Idempotence> for A {
+    fn term_derive(proof: Proven<T, Self>) -> Proven<T, And<A, A>> {
+        proof.relabel()
+    }
+}
+
+impl<T, A> TermDerive<A, T, Idempotence> for Or<A, A>
+where
+    Self: Predicate<T>,
+{
+    fn term_derive(proof: Proven<T, Self>) -> Proven<T, A> {
+        proof.relabel()
+    }
+}
+
+impl<T, A: Predicate<T>> TermDerive<Or<A, A>, T, Idempotence> for A {
+    fn term_derive(proof: Proven<T, Self>) -> Proven<T, Or<A, A>> {
+        proof.relabel()
+    }
+}
+
+/// Absorption: `A ∧ (A ∨ B) ⇔ A` and `A ∨ (A ∧ B) ⇔ A`. See [`TermDerive`].
+///
+/// In the `⇐` direction `B` is arbitrary and chosen by the target type.
+pub enum Absorb {}
+
+impl<T, A, B> TermDerive<A, T, Absorb> for And<A, Or<A, B>>
+where
+    Self: Predicate<T>,
+{
+    fn term_derive(proof: Proven<T, Self>) -> Proven<T, A> {
+        proof.relabel()
+    }
+}
+
+impl<T, A: Predicate<T>, B> TermDerive<And<A, Or<A, B>>, T, Absorb> for A {
+    fn term_derive(proof: Proven<T, Self>) -> Proven<T, And<A, Or<A, B>>> {
+        proof.relabel()
+    }
+}
+
+impl<T, A, B> TermDerive<A, T, Absorb> for Or<A, And<A, B>>
+where
+    Self: Predicate<T>,
+{
+    fn term_derive(proof: Proven<T, Self>) -> Proven<T, A> {
+        proof.relabel()
+    }
+}
+
+impl<T, A: Predicate<T>, B> TermDerive<Or<A, And<A, B>>, T, Absorb> for A {
+    fn term_derive(proof: Proven<T, Self>) -> Proven<T, Or<A, And<A, B>>> {
+        proof.relabel()
+    }
+}
+
+/// Distributivity: `A ∧ (B ∨ C) ⇔ (A ∧ B) ∨ (A ∧ C)` and
+/// `A ∨ (B ∧ C) ⇔ (A ∨ B) ∧ (A ∨ C)`. See [`TermDerive`].
+pub enum Distribute {}
+
+impl<T, A, B, C> TermDerive<Or<And<A, B>, And<A, C>>, T, Distribute> for And<A, Or<B, C>>
+where
+    Self: Predicate<T>,
+{
+    fn term_derive(proof: Proven<T, Self>) -> Proven<T, Or<And<A, B>, And<A, C>>> {
+        proof.relabel()
+    }
+}
+
+impl<T, A, B, C> TermDerive<And<A, Or<B, C>>, T, Distribute> for Or<And<A, B>, And<A, C>>
+where
+    Self: Predicate<T>,
+{
+    fn term_derive(proof: Proven<T, Self>) -> Proven<T, And<A, Or<B, C>>> {
+        proof.relabel()
+    }
+}
+
+impl<T, A, B, C> TermDerive<And<Or<A, B>, Or<A, C>>, T, Distribute> for Or<A, And<B, C>>
+where
+    Self: Predicate<T>,
+{
+    fn term_derive(proof: Proven<T, Self>) -> Proven<T, And<Or<A, B>, Or<A, C>>> {
+        proof.relabel()
+    }
+}
+
+impl<T, A, B, C> TermDerive<Or<A, And<B, C>>, T, Distribute> for And<Or<A, B>, Or<A, C>>
+where
+    Self: Predicate<T>,
+{
+    fn term_derive(proof: Proven<T, Self>) -> Proven<T, Or<A, And<B, C>>> {
+        proof.relabel()
     }
 }
