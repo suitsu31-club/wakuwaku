@@ -37,7 +37,7 @@ pub trait Predicate<T> {
     ) -> impl Future<Output = Result<(), PredicateError<Self, T>>> + Send;
 }
 
-type PredicateError<P: Predicate<T>, T> = ValidateError<<P::Ctx as ValidateContext>::IoError>;
+type PredicateError<P, T> = ValidateError<<<P as Predicate<T>>::Ctx as ValidateContext>::IoError>;
 
 /// Evidence that P held for `subject`. The field is private, so there is no way to build this outside `prove`.
 pub struct Proven<T, P> {
@@ -67,9 +67,10 @@ pub struct And<A, B>(PhantomData<(A, B)>);
 
 impl<T, A: Predicate<T>, B: Predicate<T>> Predicate<T> for And<A, B>
 where
-    A::Ctx: Sync + Clone,
+    A::Ctx: Send + Sync + Clone,
     B::Ctx: From<A::Ctx> + Send + Sync,
     <B::Ctx as ValidateContext>::IoError: Into<<A::Ctx as ValidateContext>::IoError> + Send + Sync,
+    <A::Ctx as ValidateContext>::IoError: Send,
     A: Sync,
     T: Sync,
 {
@@ -83,7 +84,16 @@ where
         let ctx_b: B::Ctx = ctx.clone().into();
         match check_order {
             CheckOrder::Parallel => {
-                todo!()
+                let (a, b) = tokio::join!(
+                    A::check(s, ctx, CheckOrder::Parallel),
+                    B::check(s, &ctx_b, CheckOrder::Parallel),
+                );
+                a?;
+                match b {
+                    Ok(()) => Ok(()),
+                    Err(ValidateError::Deny(s)) => Err(ValidateError::Deny(s)),
+                    Err(ValidateError::IoError(e)) => Err(ValidateError::IoError(e.into())),
+                }
             }
             CheckOrder::Sequential => {
                 A::check(s, ctx, CheckOrder::Sequential).await?;
