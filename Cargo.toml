@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["wakuwaku", "wakuwaku-gate"]
+members = ["wakuwaku", "wakuwaku-gate", "wakuwaku-proof"]
 
 [workspace.package]
 edition = "2024"
