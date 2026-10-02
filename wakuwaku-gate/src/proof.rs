@@ -114,7 +114,7 @@ impl<T, A: Predicate<T>, B: Predicate<T>> Predicate<T> for Or<A, B>
 where
     A::Ctx: Send + Sync + Clone,
     B::Ctx: From<A::Ctx> + Send + Sync,
-    <B::Ctx as ValidateContext>::IoError: Into<<A::Ctx as ValidateContext>::IoError> + Send + Sync,
+    <B::Ctx as ValidateContext>::IoError: Send + Sync,
     <A::Ctx as ValidateContext>::IoError: Send,
     A: Sync,
     T: Sync,
@@ -133,22 +133,18 @@ where
                     A::check(s, ctx, CheckOrder::Parallel),
                     B::check(s, &ctx_b, CheckOrder::Parallel),
                 );
-                a?;
-                match b {
-                    Ok(()) => Ok(()),
-                    Err(ValidateError::Deny(s)) => Err(ValidateError::Deny(s)),
-                    Err(ValidateError::IoError(e)) => Err(ValidateError::IoError(e.into())),
+                match (a, b) {
+                    (_, Ok(())) | (Ok(()), _) => Ok(()),
+                    (Err(e), Err(_)) => Err(e),
                 }
             }
             CheckOrder::Sequential => {
-                A::check(s, ctx, CheckOrder::Sequential).await?;
-                B::check(s, &ctx_b, CheckOrder::Sequential)
-                    .await
-                    .map_err(|e| match e {
-                        ValidateError::Deny(s) => ValidateError::Deny(s),
-                        ValidateError::IoError(e) => ValidateError::IoError(e.into()),
-                    })?;
-                Ok(())
+                let a = A::check(s, ctx, CheckOrder::Sequential).await;
+                let b = B::check(s, &ctx_b, CheckOrder::Sequential).await;
+                match (a, b) {
+                    (_, Ok(())) | (Ok(()), _) => Ok(()),
+                    (Err(e), Err(_)) => Err(e),
+                }
             }
         }
     }
