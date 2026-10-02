@@ -110,6 +110,25 @@ where
 }
 
 pub struct Or<A, B>(PhantomData<(A, B)>);
+
+impl<T, A, B> Proven<T, Or<A, B>> {
+    /// `A` held for the subject, so `A ∨ B` holds.
+    pub fn from_a(a: Proven<T, A>) -> Self {
+        Proven {
+            subject: a.subject,
+            _p: PhantomData,
+        }
+    }
+
+    /// `B` held for the subject, so `A ∨ B` holds.
+    pub fn from_b(b: Proven<T, B>) -> Self {
+        Proven {
+            subject: b.subject,
+            _p: PhantomData,
+        }
+    }
+}
+
 impl<T, A: Predicate<T>, B: Predicate<T>> Predicate<T> for Or<A, B>
 where
     A::Ctx: Send + Sync + Clone,
