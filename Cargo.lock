@@ -4963,13 +4963,13 @@ dependencies = [
 [[package]]
 name = "wakuwaku-gate"
 version = "0.1.0"
-dependencies = [
- "tokio",
-]
 
 [[package]]
 name = "wakuwaku-proof"
 version = "0.1.0"
+dependencies = [
+ "tokio",
+]
 
 [[package]]
 name = "walkdir"
