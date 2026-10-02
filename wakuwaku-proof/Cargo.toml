@@ -8,3 +8,4 @@ homepage.workspace = true
 
 [dependencies]
 tokio.workspace = true
+either.workspace = true
