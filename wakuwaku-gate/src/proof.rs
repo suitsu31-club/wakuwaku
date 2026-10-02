@@ -108,3 +108,48 @@ where
         }
     }
 }
+
+pub struct Or<A, B>(PhantomData<(A, B)>);
+impl<T, A: Predicate<T>, B: Predicate<T>> Predicate<T> for Or<A, B>
+where
+    A::Ctx: Send + Sync + Clone,
+    B::Ctx: From<A::Ctx> + Send + Sync,
+    <B::Ctx as ValidateContext>::IoError: Into<<A::Ctx as ValidateContext>::IoError> + Send + Sync,
+    <A::Ctx as ValidateContext>::IoError: Send,
+    A: Sync,
+    T: Sync,
+{
+    type Ctx = A::Ctx;
+
+    async fn check(
+        s: &T,
+        ctx: &Self::Ctx,
+        check_order: CheckOrder,
+    ) -> Result<(), PredicateError<A, T>> {
+        let ctx_b: B::Ctx = ctx.clone().into();
+        match check_order {
+            CheckOrder::Parallel => {
+                let (a, b) = tokio::join!(
+                    A::check(s, ctx, CheckOrder::Parallel),
+                    B::check(s, &ctx_b, CheckOrder::Parallel),
+                );
+                a?;
+                match b {
+                    Ok(()) => Ok(()),
+                    Err(ValidateError::Deny(s)) => Err(ValidateError::Deny(s)),
+                    Err(ValidateError::IoError(e)) => Err(ValidateError::IoError(e.into())),
+                }
+            }
+            CheckOrder::Sequential => {
+                A::check(s, ctx, CheckOrder::Sequential).await?;
+                B::check(s, &ctx_b, CheckOrder::Sequential)
+                    .await
+                    .map_err(|e| match e {
+                        ValidateError::Deny(s) => ValidateError::Deny(s),
+                        ValidateError::IoError(e) => ValidateError::IoError(e.into()),
+                    })?;
+                Ok(())
+            }
+        }
+    }
+}
