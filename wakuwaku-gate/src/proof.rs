@@ -21,14 +21,23 @@ pub trait ValidateContext {
     type IoError;
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum CheckOrder {
+    Parallel,
+    Sequential,
+}
+
 /// A proposition about T, decided at runtime.
 pub trait Predicate<T> {
     type Ctx: ValidateContext;
     fn check(
         subject: &T,
         ctx: &Self::Ctx,
-    ) -> impl Future<Output = Result<(), ValidateError<<Self::Ctx as ValidateContext>::IoError>>> + Send;
+        order: CheckOrder,
+    ) -> impl Future<Output = Result<(), PredicateError<Self, T>>> + Send;
 }
+
+type PredicateError<P: Predicate<T>, T> = ValidateError<<P::Ctx as ValidateContext>::IoError>;
 
 /// Evidence that P held for `subject`. The field is private, so there is no way to build this outside `prove`.
 pub struct Proven<T, P> {
@@ -45,10 +54,31 @@ impl<T, P> Proven<T, P> {
 pub async fn prove<T, P: Predicate<T>>(
     subject: T,
     ctx: &P::Ctx,
-) -> Result<Proven<T, P>, ValidateError<<P::Ctx as ValidateContext>::IoError>> {
-    P::check(&subject, ctx).await?;
+    check_order: CheckOrder,
+) -> Result<Proven<T, P>, PredicateError<P, T>> {
+    P::check(&subject, ctx, check_order).await?;
     Ok(Proven {
         subject,
         _p: PhantomData,
     })
+}
+
+pub struct And<A, B>(PhantomData<(A, B)>);
+
+impl<T, A: Predicate<T>, B: Predicate<T>> Predicate<T> for And<A, B>
+where
+    A::Ctx: Sync,
+    B::Ctx: From<A::Ctx> + Sync,
+    A: Sync,
+    T: Sync,
+{
+    type Ctx = A::Ctx;
+
+    async fn check(
+        s: &T,
+        ctx: &Self::Ctx,
+        check_order: CheckOrder,
+    ) -> Result<(), PredicateError<A, T>> {
+        todo!()
+    }
 }
