@@ -4965,6 +4965,10 @@ name = "wakuwaku-gate"
 version = "0.1.0"
 
 [[package]]
+name = "wakuwaku-iggy"
+version = "0.1.0"
+
+[[package]]
 name = "wakuwaku-proof"
 version = "0.1.0"
 dependencies = [
