@@ -1,6 +1,7 @@
 [package]
 name = "wakuwaku-proof"
 version = "0.1.0"
+description = "Proof-carrying validation for wakuwaku"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
