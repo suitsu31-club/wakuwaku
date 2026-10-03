@@ -9,7 +9,7 @@
 
 pub mod boolean_algebra;
 
-use std::marker::PhantomData;
+use std::ops::Deref;
 
 #[cfg(doc)]
 use boolean_algebra::{Absorb, Associate, Commute, Distribute, Idempotence};
@@ -75,16 +75,26 @@ pub enum CheckOrder {
 
 /// A proposition about `T`, decided at runtime.
 ///
-/// Implementors are usually zero-sized marker types: `check` takes no `self`, so all
-/// state the decision needs lives in [`Predicate::Ctx`]. Use [`prove`] to run a
-/// predicate and obtain a [`Proven`].
-pub trait Predicate<T> {
+/// The implementing type is also the evidence: when the proposition holds,
+/// [`check`](Self::check) returns a value of `Self`. A predicate with nothing to report
+/// is a unit struct that returns itself; one that learns something while deciding,
+/// such as the row it looked up, carries it in its fields. Use [`prove`] to run a
+/// predicate and obtain a [`Proven`], which exposes the evidence by reference through
+/// [`Proven::evidence`].
+///
+/// `check` takes no `self`, so all state the decision needs lives in
+/// [`Predicate::Ctx`].
+///
+/// A value of `Self` on its own proves nothing: anyone can construct a unit-struct
+/// predicate, and calling `check` directly returns evidence detached from any subject.
+/// Code that requires a validated value must take [`Proven<T, Self>`], not `Self`.
+pub trait Predicate<T>: Sized {
     /// Context the check reads, which also fixes the I/O error type.
     type Ctx: ValidateContext;
 
     /// Decides whether the proposition holds for `subject`.
     ///
-    /// Returns `Ok(())` if it holds, [`ValidateError::Deny`] if it does not, and
+    /// Returns the evidence if it holds, [`ValidateError::Deny`] if it does not, and
     /// [`ValidateError::IoError`] if it could not be decided. `order` is only
     /// meaningful to predicates that compose others; see [`CheckOrder`].
     ///
@@ -93,34 +103,65 @@ pub trait Predicate<T> {
         subject: &T,
         ctx: &Self::Ctx,
         order: CheckOrder,
-    ) -> impl Future<Output = Result<(), PredicateError<Self, T>>> + Send;
+    ) -> impl Future<Output = Result<Self, PredicateError<Self, T>>> + Send;
 }
 
 /// The [`ValidateError`] produced by predicate `P` checking a `T`.
 type PredicateError<P, T> = ValidateError<<<P as Predicate<T>>::Ctx as ValidateContext>::IoError>;
 
-/// Evidence that predicate `P` held for the wrapped subject.
+/// Evidence that predicate `P` held, as stored in [`Proven`], [`And`] and [`Or`].
 ///
-/// The field is private. Outside this crate a `Proven` can only come from [`prove`],
+/// Read it through [`Deref`]. It cannot be taken out by value, and it is not [`Clone`]
+/// even when `P` is: only this crate's laws duplicate evidence, and only those whose
+/// target needs the same proof twice, which then require `P: Clone` (see
+/// [`TermDerive`]).
+#[derive(Debug)]
+pub struct Evidence<P>(P);
+
+impl<P: Clone> Evidence<P> {
+    /// A second copy, for laws whose target contains the same proof twice.
+    fn duplicate(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
+impl<P> Deref for Evidence<P> {
+    type Target = P;
+
+    fn deref(&self) -> &P {
+        &self.0
+    }
+}
+
+/// Proof that predicate `P` held for the wrapped subject, carrying the evidence the
+/// check produced.
+///
+/// The fields are private. Outside this crate a `Proven` can only come from [`prove`],
 /// or from an existing proof via [`Proven::from_a`] / [`Proven::from_b`] (for [`Or`]),
 /// [`Proven::from_both`] / [`Proven::into_a`] / [`Proven::into_b`] (for [`And`]), or
 /// [`Proven::derive`] (see [`TermDerive`]).
 ///
 /// The subject is owned and only exposed through `&T`, so it cannot be mutated after
-/// the check (interior mutability excepted). The evidence reflects the moment of the
-/// check: if `P` depends on external state, such as a database row, that state may
-/// have changed since.
+/// the check (interior mutability excepted). The evidence is only exposed through
+/// `&P`. Both reflect the moment of the check: if `P` depends on external state, such
+/// as a database row, that state may have changed since.
+///
+/// `Proven<T, P>` is [`Send`] / [`Sync`] when both `T` and `P` are.
 pub struct Proven<T, P> {
     subject: T,
-    // `fn() -> P` keeps `P` out of auto-trait and drop-check reasoning: `P` is a
-    // marker, never stored.
-    _p: PhantomData<fn() -> P>,
+    evidence: Evidence<P>,
 }
 
 impl<T, P> Proven<T, P> {
     /// The validated subject.
     pub fn subject(&self) -> &T {
         &self.subject
+    }
+
+    /// The evidence that `P` held: what `P`'s check returned, or what a law built from
+    /// the evidence of the proof it was derived from.
+    pub fn evidence(&self) -> &P {
+        &self.evidence
     }
 
     /// Converts this into a proof of `Q` along the law `R`, without rechecking.
@@ -134,18 +175,21 @@ impl<T, P> Proven<T, P> {
         P::term_derive(self)
     }
 
-    /// Relabels the proof as `Q` without checking anything.
+    /// Converts the proof into a proof of `Q` about the same subject, building `Q`'s
+    /// evidence from `P`'s with `f`. Nothing is checked.
     ///
-    /// Private on purpose: every caller must justify that `P` implies `Q`.
-    fn relabel<Q>(self) -> Proven<T, Q> {
+    /// Private on purpose: every caller must justify that `P` implies `Q` and that `f`
+    /// turns evidence of `P` into evidence of `Q`.
+    fn map_evidence<Q>(self, f: impl FnOnce(P) -> Q) -> Proven<T, Q> {
         Proven {
             subject: self.subject,
-            _p: PhantomData,
+            evidence: Evidence(f(self.evidence.0)),
         }
     }
 }
 
-/// Checks `P` against `subject` and, if it holds, wraps the subject in [`Proven`].
+/// Checks `P` against `subject` and, if it holds, wraps the subject and the evidence
+/// in [`Proven`].
 ///
 /// `check_order` is passed to [`Predicate::check`] and controls how combinators
 /// evaluate their operands.
@@ -158,14 +202,15 @@ pub async fn prove<T, P: Predicate<T>>(
     ctx: &P::Ctx,
     check_order: CheckOrder,
 ) -> Result<Proven<T, P>, PredicateError<P, T>> {
-    P::check(&subject, ctx, check_order).await?;
+    let evidence = P::check(&subject, ctx, check_order).await?;
     Ok(Proven {
         subject,
-        _p: PhantomData,
+        evidence: Evidence(evidence),
     })
 }
 
-/// Conjunction: holds when both `A` and `B` hold for the subject.
+/// Conjunction: holds when both `A` and `B` hold for the subject. The evidence is the
+/// evidence of both operands.
 ///
 /// The context is `A::Ctx`. `B`'s context is built once per check by cloning it and
 /// converting with [`From`], even when `B` ends up not running. `B`'s I/O errors are
@@ -180,13 +225,14 @@ pub async fn prove<T, P: Predicate<T>>(
 /// conjunction with [`Proven::from_both`]. A proof of the conjunction can be weakened
 /// to a proof of either operand without rechecking: see [`Proven::into_a`] and
 /// [`Proven::into_b`].
-pub struct And<A, B>(PhantomData<(A, B)>);
+#[derive(Debug)]
+pub struct And<A, B>(pub Evidence<A>, pub Evidence<B>);
 
 impl<T: Eq, A, B> Proven<T, And<A, B>> {
     /// `A` and `B` held for equal subjects, so `A ∧ B` holds.
     ///
     /// The subjects are compared with [`Eq`]; the result keeps `a`'s subject and drops
-    /// `b`'s.
+    /// `b`'s. Both evidences are kept.
     ///
     /// This is only as sound as `T`'s [`Eq`]: if two values compare equal yet a
     /// predicate distinguishes them (a custom `Eq` that ignores a field `B` inspects,
@@ -204,7 +250,7 @@ impl<T: Eq, A, B> Proven<T, And<A, B>> {
         }
         Ok(Proven {
             subject: a.subject,
-            _p: PhantomData,
+            evidence: Evidence(And(a.evidence, b.evidence)),
         })
     }
 }
@@ -213,20 +259,14 @@ impl<T: Eq, A, B> Proven<T, And<A, B>> {
 type Mismatched<T, A, B> = (Proven<T, A>, Proven<T, B>);
 
 impl<T, A, B> Proven<T, And<A, B>> {
-    /// `A ∧ B` held for the subject, so `A` holds.
+    /// `A ∧ B` held for the subject, so `A` holds. `B`'s evidence is dropped.
     pub fn into_a(self) -> Proven<T, A> {
-        Proven {
-            subject: self.subject,
-            _p: PhantomData,
-        }
+        self.map_evidence(|And(Evidence(a), _)| a)
     }
 
-    /// `A ∧ B` held for the subject, so `B` holds.
+    /// `A ∧ B` held for the subject, so `B` holds. `A`'s evidence is dropped.
     pub fn into_b(self) -> Proven<T, B> {
-        Proven {
-            subject: self.subject,
-            _p: PhantomData,
-        }
+        self.map_evidence(|And(_, Evidence(b))| b)
     }
 }
 
@@ -236,7 +276,8 @@ where
     B::Ctx: From<A::Ctx> + Send + Sync,
     <B::Ctx as ValidateContext>::IoError: Into<<A::Ctx as ValidateContext>::IoError> + Send + Sync,
     <A::Ctx as ValidateContext>::IoError: Send,
-    A: Sync,
+    A: Send + Sync,
+    B: Send,
     T: Sync,
 {
     type Ctx = A::Ctx;
@@ -245,64 +286,63 @@ where
         s: &T,
         ctx: &Self::Ctx,
         check_order: CheckOrder,
-    ) -> Result<(), PredicateError<A, T>> {
+    ) -> Result<Self, PredicateError<A, T>> {
         let ctx_b: B::Ctx = ctx.clone().into();
-        match check_order {
+        let (a, b) = match check_order {
             CheckOrder::Parallel => {
                 let (a, b) = tokio::join!(
                     A::check(s, ctx, CheckOrder::Parallel),
                     B::check(s, &ctx_b, CheckOrder::Parallel),
                 );
-                a?;
-                match b {
-                    Ok(()) => Ok(()),
-                    Err(ValidateError::Deny(s)) => Err(ValidateError::Deny(s)),
-                    Err(ValidateError::IoError(e)) => Err(ValidateError::IoError(e.into())),
-                }
+                (a?, b)
             }
             CheckOrder::Sequential => {
-                A::check(s, ctx, CheckOrder::Sequential).await?;
-                B::check(s, &ctx_b, CheckOrder::Sequential)
-                    .await
-                    .map_err(|e| match e {
-                        ValidateError::Deny(s) => ValidateError::Deny(s),
-                        ValidateError::IoError(e) => ValidateError::IoError(e.into()),
-                    })?;
-                Ok(())
+                let a = A::check(s, ctx, CheckOrder::Sequential).await?;
+                (a, B::check(s, &ctx_b, CheckOrder::Sequential).await)
             }
-        }
+        };
+        let b = b.map_err(|e| match e {
+            ValidateError::Deny(r) => ValidateError::Deny(r),
+            ValidateError::IoError(e) => ValidateError::IoError(e.into()),
+        })?;
+        Ok(And(Evidence(a), Evidence(b)))
     }
 }
 
-/// Disjunction: holds when `A` or `B` (or both) hold for the subject.
+/// Disjunction: holds when `A` or `B` (or both) hold for the subject. The evidence is
+/// that of whichever operands are known to hold.
 ///
 /// The context is `A::Ctx`. `B`'s context is built once per check by cloning it and
 /// converting with [`From`].
 ///
 /// In both [`CheckOrder`]s, both operands run to completion; `Sequential` does not
-/// skip `B` when `A` holds. If either holds, the check succeeds and any error from the
-/// other operand, including an I/O error, is discarded. If both fail, `A`'s error is
-/// returned and `B`'s is discarded, which is why `B`'s I/O error needs no conversion.
+/// skip `B` when `A` holds. If both hold, the evidence is [`Or::Both`]. If exactly one
+/// holds, the evidence is that side's, and the other operand's error, including an
+/// I/O error, is discarded. If both fail, `A`'s error is returned and `B`'s is
+/// discarded, which is why `B`'s I/O error needs no conversion.
 ///
 /// A proof of either operand can be weakened to a proof of the disjunction without
 /// rechecking: see [`Proven::from_a`] and [`Proven::from_b`].
-pub struct Or<A, B>(PhantomData<(A, B)>);
+#[derive(Debug)]
+pub enum Or<A, B> {
+    /// Evidence for `A` only. Says nothing about `B`: it failed or could not be
+    /// decided when checked, or it was never checked (see [`Proven::from_a`]).
+    Left(Evidence<A>),
+    /// Evidence for `B` only. Says nothing about `A`.
+    Right(Evidence<B>),
+    /// Evidence for both operands.
+    Both(Evidence<A>, Evidence<B>),
+}
 
 impl<T, A, B> Proven<T, Or<A, B>> {
-    /// `A` held for the subject, so `A ∨ B` holds.
+    /// `A` held for the subject, so `A ∨ B` holds. The evidence is [`Or::Left`].
     pub fn from_a(a: Proven<T, A>) -> Self {
-        Proven {
-            subject: a.subject,
-            _p: PhantomData,
-        }
+        a.map_evidence(|a| Or::Left(Evidence(a)))
     }
 
-    /// `B` held for the subject, so `A ∨ B` holds.
+    /// `B` held for the subject, so `A ∨ B` holds. The evidence is [`Or::Right`].
     pub fn from_b(b: Proven<T, B>) -> Self {
-        Proven {
-            subject: b.subject,
-            _p: PhantomData,
-        }
+        b.map_evidence(|b| Or::Right(Evidence(b)))
     }
 }
 
@@ -312,7 +352,8 @@ where
     B::Ctx: From<A::Ctx> + Send + Sync,
     <B::Ctx as ValidateContext>::IoError: Send + Sync,
     <A::Ctx as ValidateContext>::IoError: Send,
-    A: Sync,
+    A: Send + Sync,
+    B: Send,
     T: Sync,
 {
     type Ctx = A::Ctx;
@@ -321,27 +362,23 @@ where
         s: &T,
         ctx: &Self::Ctx,
         check_order: CheckOrder,
-    ) -> Result<(), PredicateError<A, T>> {
+    ) -> Result<Self, PredicateError<A, T>> {
         let ctx_b: B::Ctx = ctx.clone().into();
-        match check_order {
-            CheckOrder::Parallel => {
-                let (a, b) = tokio::join!(
-                    A::check(s, ctx, CheckOrder::Parallel),
-                    B::check(s, &ctx_b, CheckOrder::Parallel),
-                );
-                match (a, b) {
-                    (_, Ok(())) | (Ok(()), _) => Ok(()),
-                    (Err(e), Err(_)) => Err(e),
-                }
-            }
-            CheckOrder::Sequential => {
-                let a = A::check(s, ctx, CheckOrder::Sequential).await;
-                let b = B::check(s, &ctx_b, CheckOrder::Sequential).await;
-                match (a, b) {
-                    (_, Ok(())) | (Ok(()), _) => Ok(()),
-                    (Err(e), Err(_)) => Err(e),
-                }
-            }
+        let (a, b) = match check_order {
+            CheckOrder::Parallel => tokio::join!(
+                A::check(s, ctx, CheckOrder::Parallel),
+                B::check(s, &ctx_b, CheckOrder::Parallel),
+            ),
+            CheckOrder::Sequential => (
+                A::check(s, ctx, CheckOrder::Sequential).await,
+                B::check(s, &ctx_b, CheckOrder::Sequential).await,
+            ),
+        };
+        match (a, b) {
+            (Ok(a), Ok(b)) => Ok(Or::Both(Evidence(a), Evidence(b))),
+            (Ok(a), Err(_)) => Ok(Or::Left(Evidence(a))),
+            (Err(_), Ok(b)) => Ok(Or::Right(Evidence(b))),
+            (Err(e), Err(_)) => Err(e),
         }
     }
 }
@@ -383,6 +420,18 @@ where
 /// proposition implements [`Predicate<T>`], i.e. where its operands' contexts are
 /// compatible (see [`And`] and [`Or`]). The target need not be checkable.
 ///
+/// # Evidence
+///
+/// Laws carry the evidence over to the target (each predicate is its own evidence; see
+/// [`Predicate`]). Evidence the target has no room for is dropped: `A ∧ A ⇒ A` keeps
+/// the left proof, as does `A ∨ A ⇒ A` when both are present, and
+/// `A ∧ (B ∨ C) ⇒ (A ∧ B) ∨ (A ∧ C)` keeps only `A ∧ B` when both `B` and `C` held.
+/// Laws that build a disjunction from a single proof (`A ⇒ A ∨ A`,
+/// `A ⇒ A ∨ (A ∧ B)`) produce [`Or::Left`].
+///
+/// Laws whose target holds the same proof twice duplicate it and therefore require
+/// `A: Clone`: `A ⇒ A ∧ A`, `A ⇒ A ∧ (A ∨ B)` and `A ∨ (B ∧ C) ⇒ (A ∨ B) ∧ (A ∨ C)`.
+///
 /// # Implementing
 ///
 /// `term_derive` must return a [`Proven<T, P>`], which outside this crate can only be
@@ -410,8 +459,8 @@ where
 /// static LARGE: DeniedReason = DeniedReason("large");
 /// static ZERO: DeniedReason = DeniedReason("zero");
 ///
-/// fn decide(holds: bool, reason: DeniedReason) -> Result<(), ValidateError<Infallible>> {
-///     if holds { Ok(()) } else { Err(ValidateError::Deny(reason)) }
+/// fn decide<P>(holds: bool, proof: P, reason: DeniedReason) -> Result<P, ValidateError<Infallible>> {
+///     if holds { Ok(proof) } else { Err(ValidateError::Deny(reason)) }
 /// }
 ///
 /// struct Even;
@@ -420,22 +469,22 @@ where
 ///
 /// impl Predicate<u32> for Even {
 ///     type Ctx = NoCtx;
-///     async fn check(n: &u32, _: &NoCtx, _: CheckOrder) -> Result<(), ValidateError<Infallible>> {
-///         decide(n % 2 == 0, ODD)
+///     async fn check(n: &u32, _: &NoCtx, _: CheckOrder) -> Result<Self, ValidateError<Infallible>> {
+///         decide(n % 2 == 0, Even, ODD)
 ///     }
 /// }
 ///
 /// impl Predicate<u32> for Small {
 ///     type Ctx = NoCtx;
-///     async fn check(n: &u32, _: &NoCtx, _: CheckOrder) -> Result<(), ValidateError<Infallible>> {
-///         decide(*n < 100, LARGE)
+///     async fn check(n: &u32, _: &NoCtx, _: CheckOrder) -> Result<Self, ValidateError<Infallible>> {
+///         decide(*n < 100, Small, LARGE)
 ///     }
 /// }
 ///
 /// impl Predicate<u32> for Positive {
 ///     type Ctx = NoCtx;
-///     async fn check(n: &u32, _: &NoCtx, _: CheckOrder) -> Result<(), ValidateError<Infallible>> {
-///         decide(*n > 0, ZERO)
+///     async fn check(n: &u32, _: &NoCtx, _: CheckOrder) -> Result<Self, ValidateError<Infallible>> {
+///         decide(*n > 0, Positive, ZERO)
 ///     }
 /// }
 ///
@@ -453,11 +502,13 @@ where
 ///
 /// // Even ∧ (Small ∨ Positive) ⇒ (Even ∧ Small) ∨ (Even ∧ Positive), by `Distribute`.
 /// let n = n.derive::<Or<And<Even, Small>, And<Even, Positive>>, _>();
+/// // 42 is both small and positive, but the law keeps only the `Even ∧ Small` side.
+/// assert!(matches!(n.evidence(), Or::Left(_)));
 /// // ⇒ (Even ∧ Positive) ∨ (Even ∧ Small), by `Commute`; the target is inferred.
 /// assert_eq!(accept(n.derive()), 42);
 /// # }
 /// ```
-pub trait TermDerive<P, T, R>: Predicate<T> + Sized {
+pub trait TermDerive<P, T, R>: Predicate<T> {
     /// `Self` held for the subject, so `P` holds for it.
     fn term_derive(proof: Proven<T, Self>) -> Proven<T, P>;
 }

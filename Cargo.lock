@@ -4968,7 +4968,6 @@ version = "0.1.0"
 name = "wakuwaku-proof"
 version = "0.1.0"
 dependencies = [
- "either",
  "tokio",
 ]
 
