@@ -7,3 +7,4 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
+num_enum = "0.7"
