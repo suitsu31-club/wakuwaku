@@ -10,7 +10,21 @@ pub trait EventOptimize {
     fn into_inner(self) -> Self::EventInner;
 }
 
-pub trait Event: EventOptimize {
+pub trait EventBody: kanau::message::MessageDe + kanau::message::MessageSer {}
+
+pub trait IntoEventBody {
+    type Target: EventBody;
+    fn into_event_body(self) -> Self::Target;
+}
+
+impl<T: EventBody> IntoEventBody for T {
+    type Target = T;
+    fn into_event_body(self) -> Self::Target {
+        self
+    }
+}
+
+pub trait Event: EventOptimize + IntoEventBody {
     const TYPE_TAG: EventTypeTag;
     type Key: PartitionKey;
     fn key(&self) -> Self::Key;

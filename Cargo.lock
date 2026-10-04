@@ -4990,6 +4990,7 @@ version = "0.1.0"
 name = "wakuwaku-iggy"
 version = "0.1.0"
 dependencies = [
+ "kanau",
  "num_enum",
 ]
 

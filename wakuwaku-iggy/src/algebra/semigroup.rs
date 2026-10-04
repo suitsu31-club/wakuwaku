@@ -1,5 +1,5 @@
 use crate::events::{
-    EventAlgebraicProperties, EventAssociativity, EventAtomicOrdering, EventOptimize,
+    EventAlgebraicProperties, EventAssociativity, EventAtomicOrdering, EventOptimize, IntoEventBody,
 };
 
 pub trait EventSemigroup {
@@ -30,5 +30,12 @@ impl<T: EventSemigroup> EventOptimize for SemigroupOptimize<T> {
     }
     fn into_inner(self) -> Self::EventInner {
         self.event
+    }
+}
+
+impl<T: EventSemigroup + IntoEventBody> IntoEventBody for SemigroupOptimize<T> {
+    type Target = T::Target;
+    fn into_event_body(self) -> Self::Target {
+        self.event.into_event_body()
     }
 }

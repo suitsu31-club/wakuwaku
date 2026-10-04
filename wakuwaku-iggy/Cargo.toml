@@ -7,4 +7,5 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
+kanau.workspace = true
 num_enum = "0.7"
