@@ -1,13 +1,17 @@
+use crate::algebra::Algebra;
 use crate::partition::PartitionKey;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct EventTypeTag(u32);
 
-pub trait EventOptimize {
-    type EventInner;
-    fn get_algebraic_properties(&self) -> EventAlgebraicProperties;
-    fn into_inner(self) -> Self::EventInner;
+impl EventTypeTag {
+    pub const fn new(tag: u32) -> Self {
+        Self(tag)
+    }
+    pub const fn get(self) -> u32 {
+        self.0
+    }
 }
 
 pub trait EventBody: kanau::message::MessageDe + kanau::message::MessageSer {}
@@ -24,10 +28,28 @@ impl<T: EventBody> IntoEventBody for T {
     }
 }
 
-pub trait Event: EventOptimize + IntoEventBody {
+pub trait Event: IntoEventBody {
     const TYPE_TAG: EventTypeTag;
     type Key: PartitionKey;
+    /// How the consumer may optimize a run of this event's decoded bodies.
+    ///
+    /// One of the markers in [`algebra`](crate::algebra). The choice is static:
+    /// the consumer reduces runs with it, and [`algebraic_properties`]
+    /// only copies its [`ASSOCIATIVITY`](Algebra::ASSOCIATIVITY) into the
+    /// message header.
+    ///
+    /// [`algebraic_properties`]: Event::algebraic_properties
+    type Algebra: Algebra<Self::Target>;
     fn key(&self) -> Self::Key;
+    /// Ordering of this message relative to other messages of the same key.
+    fn atomic_ordering(&self) -> EventAtomicOrdering;
+    /// Properties written into the message header.
+    fn algebraic_properties(&self) -> EventAlgebraicProperties {
+        EventAlgebraicProperties {
+            atomic_level: self.atomic_ordering(),
+            associativity: <Self::Algebra as Algebra<Self::Target>>::ASSOCIATIVITY,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -66,14 +88,21 @@ impl EventAlgebraicProperties {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive, IntoPrimitive)]
 #[repr(u8)]
-/// The atomic ordering of the event. This can help to batch the same types of events together.
-/// No matter what the atomic ordering is, the order of the same type of events is preserved.
+/// Ordering of an event relative to the other events **of the same key**.
+///
+/// Events of different keys are never ordered against each other, even when
+/// they share an Iggy partition. Whatever the ordering, events of the same key
+/// and the same type keep their log order.
+///
+/// The consumer's [planner](crate::consumer::plan) enforces fences
+/// conservatively: `Acquire` and `AcqRel` also keep earlier events of the key
+/// before the fence, and `Release` also keeps later events after it.
 pub enum EventAtomicOrdering {
-    /// The event is free to move, as long as the order of the same type of events is preserved
+    /// The event may move past any event of the same key with a different type.
     Relaxed = 1,
-    /// No events after this event can be processed before this event
+    /// No later event of the same key may be processed before this event.
     Acquire = 2,
-    /// No events before this event can be processed after this event
+    /// No earlier event of the same key may be processed after this event.
     Release = 4,
     /// `Acquire` + `Release`.
     AcqRel = 6,
@@ -81,15 +110,18 @@ pub enum EventAtomicOrdering {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive, IntoPrimitive)]
 #[repr(u8)]
-/// The associativity of the same type of events. This can help to optimize the processing of batched
-/// events of the same type.
+/// Wire value of an event type's [`Algebra`]. Each variant names the marker in
+/// [`algebra`](crate::algebra) that selects it, and that marker's reduction is
+/// what the consumer applies.
 pub enum EventAssociativity {
-    /// Require [EventSemigroup](crate::algebra::semigroup::EventSemigroup) trait.
-    Associative = 1,
-    /// Require `Eq` trait. The same events will be reduced to one event.
-    Idempotent = 2,
-    /// The event will be processed in any order.
-    Commutative = 3,
-    /// No algebraic optimization is possible.
+    /// [`algebra::NonAssociative`](crate::algebra::NonAssociative).
     NonAssociative = 0,
+    /// [`algebra::Associative`](crate::algebra::Associative).
+    Associative = 1,
+    /// [`algebra::Idempotent`](crate::algebra::Idempotent).
+    Idempotent = 2,
+    /// [`algebra::Commutative`](crate::algebra::Commutative).
+    Commutative = 3,
+    /// [`algebra::IdempotentCommutative`](crate::algebra::IdempotentCommutative).
+    IdempotentCommutative = 4,
 }
