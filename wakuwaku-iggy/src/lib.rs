@@ -8,3 +8,4 @@
 pub mod events;
 pub mod partition;
 pub mod algebra;
+pub mod consumer;
