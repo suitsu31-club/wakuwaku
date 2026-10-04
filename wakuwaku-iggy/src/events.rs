@@ -56,7 +56,7 @@ impl EventAlgebraicProperties {
 /// No matter what the atomic ordering is, the order of the same type of events is preserved.
 pub enum EventAtomicOrdering {
     /// The event is free to move, as long as the order of the same type of events is preserved
-    RelaxedCommutative = 1,
+    Relaxed = 1,
     /// No events after this event can be processed before this event
     Acquire = 2,
     /// No events before this event can be processed after this event
