@@ -70,7 +70,7 @@ pub enum EventAtomicOrdering {
 /// The associativity of the same type of events. This can help to optimize the processing of batched
 /// events of the same type.
 pub enum EventAssociativity {
-    /// Require [EventSemigroup](crate::algebra::semigroup) trait.
+    /// Require [EventSemigroup](crate::algebra::semigroup::EventSemigroup) trait.
     Associative = 1,
     /// Require `Eq` trait. The same events will be reduced to one event.
     Idempotent = 2,
