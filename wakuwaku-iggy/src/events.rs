@@ -55,7 +55,7 @@ pub trait Event: IntoEventBody {
 #[derive(Debug)]
 pub enum EventParseError {
     UnknownEventType,
-    UnknownPropertiesGen,
+    UnknownPropertiesVersion,
     BadProperties,
 }
 
@@ -66,15 +66,18 @@ pub struct EventAlgebraicProperties {
 }
 
 impl EventAlgebraicProperties {
-    pub const GEN: u8 = 1;
-    pub const LENGTH: usize = 2;
+    pub const VERSION: u8 = 1;
+    pub const LENGTH: usize = 3;
     pub fn into_bytes(self) -> [u8; Self::LENGTH] {
-        [self.atomic_level as u8, self.associativity as u8]
+        [1u8, self.atomic_level as u8, self.associativity as u8]
     }
     pub fn parse(bytes: &[u8]) -> Result<Self, EventParseError> {
-        let [atomic_level, associativity] = bytes
+        let [version, atomic_level, associativity] = bytes
             .try_into()
             .map_err(|_| EventParseError::BadProperties)?;
+        if version != Self::VERSION {
+            return Err(EventParseError::UnknownPropertiesVersion);
+        }
         Ok(EventAlgebraicProperties {
             atomic_level: atomic_level
                 .try_into()
