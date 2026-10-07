@@ -329,13 +329,13 @@ impl<K> Builder<K> {
 
 #[cfg(test)]
 #[allow(clippy::arithmetic_side_effects)]
-mod tests {
+pub(crate) mod test_support {
     use super::*;
     use EventAtomicOrdering::{AcqRel, Acquire, Relaxed, Release};
 
-    const ORDERINGS: [EventAtomicOrdering; 4] = [Relaxed, Acquire, Release, AcqRel];
+    pub(crate) const ORDERINGS: [EventAtomicOrdering; 4] = [Relaxed, Acquire, Release, AcqRel];
 
-    fn record(key: u8, tag: u32, ordering: EventAtomicOrdering) -> PlanRecord<u8> {
+    pub(crate) fn record(key: u8, tag: u32, ordering: EventAtomicOrdering) -> PlanRecord<u8> {
         PlanRecord {
             key,
             tag: EventTypeTag::new(tag),
@@ -344,7 +344,7 @@ mod tests {
     }
 
     #[derive(Debug, Clone, Copy)]
-    struct Place {
+    pub(crate) struct Place {
         segment: usize,
         rank: Rank,
         run: usize,
@@ -353,7 +353,7 @@ mod tests {
 
     /// Where every record ends up; asserts each record is planned exactly once
     /// and stays in its own key and type.
-    fn places(records: &[PlanRecord<u8>], plan: &Plan<u8>) -> Vec<Place> {
+    pub(crate) fn places(records: &[PlanRecord<u8>], plan: &Plan<u8>) -> Vec<Place> {
         let mut places: Vec<Option<Place>> = vec![None; records.len()];
         let mut run_id = 0;
         for key in plan.keys() {
@@ -385,35 +385,23 @@ mod tests {
     }
 
     /// `x` is processed before `y` in every execution the plan allows.
-    fn precedes(x: Place, y: Place) -> bool {
+    pub(crate) fn precedes(x: Place, y: Place) -> bool {
         x.segment < y.segment
             || (x.segment == y.segment
                 && ((x.run == y.run && x.position < y.position) || x.rank < y.rank))
     }
 
-    fn assert_respects_ordering(records: &[PlanRecord<u8>]) {
-        let plan = Plan::new(records);
-        let places = places(records, &plan);
-        for (i, x) in records.iter().enumerate() {
-            for (j, y) in records.iter().enumerate().skip(i + 1) {
-                if x.key != y.key {
-                    continue;
-                }
-                let required = x.tag == y.tag
-                    || matches!(x.ordering, Acquire | AcqRel)
-                    || matches!(y.ordering, Release | AcqRel);
-                if required {
-                    assert!(
-                        precedes(places[i], places[j]),
-                        "{records:?}: record {i} must precede record {j}, plan {plan:?}"
-                    );
-                }
-            }
-        }
+    /// The log order of `x` before `y` must be kept: they share a key and
+    /// either a type or a fence between them.
+    pub(crate) fn required(x: &PlanRecord<u8>, y: &PlanRecord<u8>) -> bool {
+        x.key == y.key
+            && (x.tag == y.tag
+                || matches!(x.ordering, Acquire | AcqRel)
+                || matches!(y.ordering, Release | AcqRel))
     }
 
     /// Every sequence of up to `max_len` records drawn from `alphabet`.
-    fn for_each_sequence(
+    pub(crate) fn for_each_sequence(
         alphabet: &[PlanRecord<u8>],
         max_len: u32,
         mut f: impl FnMut(&[PlanRecord<u8>]),
@@ -427,6 +415,29 @@ mod tests {
                     code /= alphabet.len();
                 }
                 f(&sequence);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::arithmetic_side_effects)]
+mod tests {
+    use super::test_support::*;
+    use super::*;
+    use EventAtomicOrdering::{Acquire, Relaxed, Release};
+
+    fn assert_respects_ordering(records: &[PlanRecord<u8>]) {
+        let plan = Plan::new(records);
+        let places = places(records, &plan);
+        for (i, x) in records.iter().enumerate() {
+            for (j, y) in records.iter().enumerate().skip(i + 1) {
+                if required(x, y) {
+                    assert!(
+                        precedes(places[i], places[j]),
+                        "{records:?}: record {i} must precede record {j}, plan {plan:?}"
+                    );
+                }
             }
         }
     }

@@ -57,6 +57,11 @@ pub enum EventParseError {
     UnknownEventType,
     UnknownPropertiesVersion,
     BadProperties,
+    /// The named header is absent.
+    MissingHeader(&'static str),
+    /// The named header has the wrong length or content.
+    BadHeader(&'static str),
+    UnknownRetryVersion,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
