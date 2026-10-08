@@ -39,6 +39,7 @@ pub struct ConsumerConfig {
     pub consumer_name: String,
     /// Partitions of the main topic to consume. Each gets its own task.
     pub partitions: Vec<u32>,
+    /// When offsets are stored.
     pub mode: DeliveryMode,
     /// Delays between retry attempts of a failed key, also used between
     /// attempts of transient failures. Must not be empty.
@@ -53,6 +54,9 @@ pub struct ConsumerConfig {
 }
 
 impl ConsumerConfig {
+    /// Configuration with defaults: [`DeliveryMode::NoEventLose`],
+    /// [`DEFAULT_RETRY_DELAYS`], 1000 messages per poll, a 100 ms idle poll
+    /// interval and at most 100 000 pending retry records per partition.
     pub fn new(
         stream: impl Into<String>,
         consumer_name: impl Into<String>,

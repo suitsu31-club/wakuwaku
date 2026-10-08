@@ -39,8 +39,11 @@ impl HeaderKeys {
 /// Headers every event message carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EventHeaders {
+    /// [`TAG_HEADER`].
     pub tag: EventTypeTag,
+    /// [`KEY_HEADER`].
     pub key: u64,
+    /// [`PROPS_HEADER`].
     pub properties: EventAlgebraicProperties,
 }
 
@@ -114,14 +117,23 @@ pub struct RetryProperties {
 }
 
 impl RetryProperties {
+    /// Version byte of the encoding.
     pub const VERSION: u8 = 1;
+    /// Length of the encoding in bytes.
     pub const LENGTH: usize = 9;
 
+    /// Encode as the version byte followed by `failed_at_ms` in little endian.
     pub fn into_bytes(self) -> [u8; Self::LENGTH] {
         let [a, b, c, d, e, f, g, h] = self.failed_at_ms.to_le_bytes();
         [Self::VERSION, a, b, c, d, e, f, g, h]
     }
 
+    /// Decode the output of [`into_bytes`](Self::into_bytes).
+    ///
+    /// # Errors
+    ///
+    /// [`EventParseError::BadHeader`] for a wrong length and
+    /// [`EventParseError::UnknownRetryVersion`] for another version.
     pub fn parse(bytes: &[u8]) -> Result<Self, EventParseError> {
         let [version, a, b, c, d, e, f, g, h] = bytes
             .try_into()

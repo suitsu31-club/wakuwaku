@@ -94,6 +94,7 @@ where
 
 /// One record of a run, as stored in the log.
 pub struct RunRecord<'a> {
+    /// Serialized event body.
     pub payload: &'a [u8],
     /// Associativity from the record's header.
     pub associativity: EventAssociativity,
@@ -105,6 +106,7 @@ pub enum RunResult {
     Done,
     /// A chunk failed with [`ErrorClass::Retryable`].
     Failed {
+        /// The handler's error.
         error: anyhow::Error,
         /// The failed chunk and every chunk after it, serialized.
         remainder: Vec<Box<[u8]>>,

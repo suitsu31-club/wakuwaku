@@ -20,6 +20,11 @@ pub struct Publisher {
 }
 
 impl Publisher {
+    /// Create a publisher writing to `stream`.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Iggy`] if `stream` is not a valid identifier.
     pub fn new(client: Arc<IggyClient>, stream: &str) -> Result<Self, Error> {
         Ok(Self {
             client,
@@ -29,6 +34,12 @@ impl Publisher {
     }
 
     /// Serialize `event` and send it to the main topic of its key type.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Serialize`] if the body can't be serialized, and
+    /// [`Error::Iggy`] if the message can't be built or sent. The send is not
+    /// retried.
     pub async fn publish<E: Event>(&self, event: E) -> Result<(), Error> {
         let key = key_hash(&event.key());
         let properties = event.algebraic_properties();

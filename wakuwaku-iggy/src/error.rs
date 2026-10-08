@@ -27,6 +27,7 @@ pub struct HandleError {
 }
 
 impl HandleError {
+    /// Wrap `source` with the given class.
     pub fn new(class: ErrorClass, source: impl Into<anyhow::Error>) -> Self {
         Self {
             class,
@@ -49,10 +50,12 @@ impl HandleError {
         Self::new(ErrorClass::Unrecoverable, source)
     }
 
+    /// How the consumer reacts to this error.
     pub fn class(&self) -> ErrorClass {
         self.class
     }
 
+    /// The underlying error.
     pub fn source(&self) -> &anyhow::Error {
         &self.source
     }
@@ -76,32 +79,48 @@ pub enum Error {
     Iggy(#[from] iggy::prelude::IggyError),
 
     #[error("{0}")]
-    /// Serialize Error by kanau
+    /// The event body could not be serialized.
     Serialize(#[from] kanau::message::SerializeError),
 
     #[error("Topic {topic} does not exist in stream {stream}")]
     /// The main topic of the registered events does not exist.
-    TopicNotFound { stream: String, topic: String },
+    TopicNotFound {
+        /// Configured stream.
+        stream: String,
+        /// Main topic of the registered events.
+        topic: String,
+    },
 
     #[error("Partition {partition} does not exist in topic {topic}")]
     /// A configured partition does not exist in the main topic.
-    PartitionNotFound { topic: String, partition: u32 },
+    PartitionNotFound {
+        /// Main topic of the registered events.
+        topic: String,
+        /// The missing partition.
+        partition: u32,
+    },
 
     #[error(
         "Topic {topic} has {topic_count} partitions but its retry topic {retry_topic} has {retry_count}"
     )]
     /// The retry topic exists with a different partition count.
     PartitionCountMismatch {
+        /// Main topic of the registered events.
         topic: String,
+        /// Name of its retry topic.
         retry_topic: String,
+        /// Partition count of the main topic.
         topic_count: u32,
+        /// Partition count of the retry topic.
         retry_count: u32,
     },
 
     #[error("Registered events use different topics: {first} and {second}")]
     /// One consumer only reads one main topic.
     MixedTopics {
+        /// Topic of the handlers registered earlier.
         first: &'static str,
+        /// Topic of the handler registered after them.
         second: &'static str,
     },
 
