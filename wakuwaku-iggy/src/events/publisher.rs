@@ -2,7 +2,7 @@
 
 use crate::error::Error;
 use crate::events::Event;
-use crate::headers::{EventHeaders, HeaderKeys};
+use crate::events::headers::{EventHeaders, HeaderKeys};
 use crate::partition::{PartitionKey, key_hash};
 use bytes::Bytes;
 use iggy::prelude::{Identifier, IggyClient, IggyMessage, MessageClient, Partitioning};

@@ -4,7 +4,7 @@
 //! this module as its [`Algebra`](crate::events::Event::Algebra). The marker
 //! decides how the consumer may optimize a *run*: the events of one type, for
 //! one key, inside one ordering segment (see
-//! [`consumer::plan`](crate::consumer::plan)). Runs never span keys, so every
+//! [`partition::plan`](crate::partition::plan)). Runs never span keys, so every
 //! law below only has to hold for events of the same key.
 //!
 //! The marker is a property of the type, not of a single message: the

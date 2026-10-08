@@ -6,11 +6,11 @@
 //! and everything else is `Relaxed`.
 
 use crate::consumer::execute::{KeyFailure, Stage};
-use crate::consumer::plan::{KeyPlan, Plan, Run};
+use crate::consumer::handler::{HandlerList, RunRecord};
 use crate::consumer::record::ParsedRecord;
+use crate::events::headers::EventHeaders;
 use crate::events::{EventAlgebraicProperties, EventAtomicOrdering};
-use crate::handler::{HandlerList, RunRecord};
-use crate::headers::EventHeaders;
+use crate::partition::plan::{KeyPlan, Plan, Run};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum StageKind {
@@ -155,8 +155,8 @@ fn push_run<L: HandlerList>(
 #[allow(clippy::arithmetic_side_effects)]
 mod tests {
     use super::*;
-    use crate::consumer::plan::PlanRecord;
-    use crate::consumer::plan::test_support::*;
+    use crate::partition::plan::PlanRecord;
+    use crate::partition::plan::test_support::*;
 
     /// Plan `records`, then write every run back out the way [`encode_key`]
     /// does, without reduction. Returns the written records and, for each of

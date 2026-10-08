@@ -1,6 +1,6 @@
-use crate::consumer::plan::PlanRecord;
 use crate::events::EventParseError;
-use crate::headers::{EventHeaders, HeaderKeys, RetryProperties};
+use crate::events::headers::{EventHeaders, HeaderKeys, RetryProperties};
+use crate::partition::plan::PlanRecord;
 use bytes::Bytes;
 use iggy::prelude::IggyMessage;
 

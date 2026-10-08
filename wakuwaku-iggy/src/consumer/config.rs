@@ -30,7 +30,7 @@ pub enum DeliveryMode {
     NoEventLose,
 }
 
-/// Configuration of [`IggyConsumerRegisterCenter::start`](crate::handler::IggyConsumerRegisterCenter::start).
+/// Configuration of [`IggyConsumerRegisterCenter::start`](crate::consumer::IggyConsumerRegisterCenter::start).
 #[derive(Debug, Clone)]
 pub struct ConsumerConfig {
     /// Stream holding the main topic and its retry topic.

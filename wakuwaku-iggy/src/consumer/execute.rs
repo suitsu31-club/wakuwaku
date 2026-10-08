@@ -1,8 +1,8 @@
 //! Executing the plan of one key.
 
-use crate::consumer::plan::{KeyPlan, Plan, Run};
+use crate::consumer::handler::{HandlerList, RunRecord, RunResult};
 use crate::consumer::record::ParsedRecord;
-use crate::handler::{HandlerList, RunRecord, RunResult};
+use crate::partition::plan::{KeyPlan, Plan, Run};
 use futures_util::future::join_all;
 use std::time::Duration;
 

@@ -189,10 +189,10 @@ fn remove_offsets(records: &mut VecDeque<PendingRecord>, offsets: &[u64]) -> usi
 mod tests {
     use super::*;
     use crate::consumer::DEFAULT_RETRY_DELAYS;
+    use crate::events::headers::EventHeaders;
     use crate::events::{
         EventAlgebraicProperties, EventAssociativity, EventAtomicOrdering, EventTypeTag,
     };
-    use crate::headers::EventHeaders;
     use bytes::Bytes;
 
     const FAILED_AT_MS: u64 = 1_000_000;

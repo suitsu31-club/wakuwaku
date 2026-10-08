@@ -1,5 +1,12 @@
-use crate::algebra::Algebra;
+//! Event traits, their wire envelope and the publisher.
+
+pub mod headers;
+pub mod publisher;
+
+pub use publisher::Publisher;
+
 use crate::partition::PartitionKey;
+use crate::partition::algebra::Algebra;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -33,7 +40,7 @@ pub trait Event: IntoEventBody {
     type Key: PartitionKey;
     /// How the consumer may optimize a run of this event's decoded bodies.
     ///
-    /// One of the markers in [`algebra`](crate::algebra). The choice is static:
+    /// One of the markers in [`algebra`](crate::partition::algebra). The choice is static:
     /// the consumer reduces runs with it, and [`algebraic_properties`]
     /// only copies its [`ASSOCIATIVITY`](Algebra::ASSOCIATIVITY) into the
     /// message header.
@@ -102,7 +109,7 @@ impl EventAlgebraicProperties {
 /// they share an Iggy partition. Whatever the ordering, events of the same key
 /// and the same type keep their log order.
 ///
-/// The consumer's [planner](crate::consumer::plan) enforces fences
+/// The consumer's [planner](crate::partition::plan) enforces fences
 /// conservatively: `Acquire` and `AcqRel` also keep earlier events of the key
 /// before the fence, and `Release` also keeps later events after it.
 pub enum EventAtomicOrdering {
@@ -119,17 +126,17 @@ pub enum EventAtomicOrdering {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive, IntoPrimitive)]
 #[repr(u8)]
 /// Wire value of an event type's [`Algebra`]. Each variant names the marker in
-/// [`algebra`](crate::algebra) that selects it, and that marker's reduction is
+/// [`algebra`](crate::partition::algebra) that selects it, and that marker's reduction is
 /// what the consumer applies.
 pub enum EventAssociativity {
-    /// [`algebra::NonAssociative`](crate::algebra::NonAssociative).
+    /// [`algebra::NonAssociative`](crate::partition::algebra::NonAssociative).
     NonAssociative = 0,
-    /// [`algebra::Associative`](crate::algebra::Associative).
+    /// [`algebra::Associative`](crate::partition::algebra::Associative).
     Associative = 1,
-    /// [`algebra::Idempotent`](crate::algebra::Idempotent).
+    /// [`algebra::Idempotent`](crate::partition::algebra::Idempotent).
     Idempotent = 2,
-    /// [`algebra::Commutative`](crate::algebra::Commutative).
+    /// [`algebra::Commutative`](crate::partition::algebra::Commutative).
     Commutative = 3,
-    /// [`algebra::IdempotentCommutative`](crate::algebra::IdempotentCommutative).
+    /// [`algebra::IdempotentCommutative`](crate::partition::algebra::IdempotentCommutative).
     IdempotentCommutative = 4,
 }

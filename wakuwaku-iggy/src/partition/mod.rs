@@ -1,3 +1,10 @@
+//! Iggy-level partitioning of events: the super partition (main topic) of a
+//! key type, key hashing, per-key reordering of a polled batch and the
+//! algebra used to fold runs of events.
+
+pub mod algebra;
+pub mod plan;
+
 use std::hash::{Hash, Hasher};
 
 /// Name of the Iggy topic that carries every event of a key type.

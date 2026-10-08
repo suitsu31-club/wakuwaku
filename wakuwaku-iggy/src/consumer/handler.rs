@@ -5,11 +5,11 @@
 //! [`push`](IggyConsumerRegisterCenter::push). Every registered event must
 //! live in the same main topic.
 
-use crate::algebra::Algebra;
 use crate::consumer::{ConsumerConfig, ConsumerRuntime};
 use crate::error::{ErrorClass, HandleError};
 use crate::events::{Event, EventAssociativity, EventTypeTag};
 use crate::partition::PartitionKey;
+use crate::partition::algebra::Algebra;
 use crate::utils::backoff::delay_for;
 use iggy::prelude::IggyClient;
 use kanau::message::{DeserializeError, MessageDe, MessageSer, SerializeError};

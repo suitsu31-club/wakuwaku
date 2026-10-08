@@ -3,7 +3,7 @@
 use crate::events::EventTypeTag;
 use std::fmt::{Display, Formatter};
 
-/// How the consumer reacts to a failed [handler](crate::handler::EventHandler)
+/// How the consumer reacts to a failed [handler](crate::consumer::EventHandler)
 /// call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorClass {
@@ -19,7 +19,7 @@ pub enum ErrorClass {
     Unrecoverable,
 }
 
-/// Error returned by a [handler](crate::handler::EventHandler).
+/// Error returned by a [handler](crate::consumer::EventHandler).
 #[derive(Debug)]
 pub struct HandleError {
     class: ErrorClass,

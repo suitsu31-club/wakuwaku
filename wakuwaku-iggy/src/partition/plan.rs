@@ -11,7 +11,7 @@
 //!   [body](Plan::body) runs follow in any order relative to each other, and
 //!   the [tail](Plan::tail) run goes last.
 //! - A **run** holds every event of one type in its segment, in log order.
-//!   It is reduced with that type's [`Algebra`](crate::algebra::Algebra)
+//!   It is reduced with that type's [`Algebra`](crate::partition::algebra::Algebra)
 //!   before it is applied.
 //!
 //! Segments come from the fences in [`EventAtomicOrdering`]:
