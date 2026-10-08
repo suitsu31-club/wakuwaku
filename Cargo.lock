@@ -5982,6 +5982,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "wakuwaku-entity"
+version = "0.1.0"
+
+[[package]]
 name = "wakuwaku-gate"
 version = "0.1.0"
 
