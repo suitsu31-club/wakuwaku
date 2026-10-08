@@ -6,16 +6,16 @@
 //! unexecuted, and keys that fail are written to retry from where they
 //! failed. See [`DeliveryMode`] for when offsets are stored.
 
-use crate::consumer::backoff::until_ok;
 use crate::consumer::config::{ConsumerConfig, DeliveryMode};
 use crate::consumer::encode::{RetryEntry, encode_key};
 use crate::consumer::execute::{KeyReport, execute_key};
 use crate::consumer::plan::Plan;
 use crate::consumer::record::{self, ParsedRecord, plan_records};
-use crate::consumer::retry::{Finish, PendingRecord, RetryState};
 use crate::error::Error;
 use crate::handler::HandlerList;
 use crate::headers::{HeaderKeys, RetryProperties};
+use crate::utils::backoff::until_ok;
+use crate::utils::retry::{Finish, PendingRecord, RetryState};
 use bytes::Bytes;
 use futures_util::future::join_all;
 use iggy::prelude::{

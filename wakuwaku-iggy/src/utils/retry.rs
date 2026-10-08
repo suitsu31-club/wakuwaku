@@ -3,8 +3,8 @@
 //! A key is quarantined while it has a pending record: its later events are
 //! diverted to the retry partition so they stay behind the failed ones.
 
-use crate::consumer::backoff::delay_for;
 use crate::consumer::record::ParsedRecord;
+use crate::utils::backoff::delay_for;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 

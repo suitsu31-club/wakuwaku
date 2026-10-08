@@ -6,11 +6,11 @@
 //! live in the same main topic.
 
 use crate::algebra::Algebra;
-use crate::consumer::backoff::delay_for;
 use crate::consumer::{ConsumerConfig, ConsumerRuntime};
 use crate::error::{ErrorClass, HandleError};
 use crate::events::{Event, EventAssociativity, EventTypeTag};
 use crate::partition::PartitionKey;
+use crate::utils::backoff::delay_for;
 use iggy::prelude::IggyClient;
 use kanau::message::{DeserializeError, MessageDe, MessageSer, SerializeError};
 use std::marker::PhantomData;
