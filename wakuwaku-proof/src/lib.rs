@@ -5,6 +5,8 @@
     clippy::arithmetic_side_effects
 )]
 
+#![warn(missing_docs)]
+
 #![doc = include_str!("../README.md")]
 
 pub mod boolean_algebra;
