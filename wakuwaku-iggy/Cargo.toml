@@ -1,6 +1,7 @@
 [package]
 name = "wakuwaku-iggy"
 version = "0.1.0"
+description = "Partition, consumer, routing and message traits for Apache Iggy"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
