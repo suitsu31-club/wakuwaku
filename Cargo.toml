@@ -1,6 +1,11 @@
 [workspace]
 resolver = "3"
-members = ["wakuwaku", "wakuwaku-entity", "wakuwaku-gate", "wakuwaku-iggy", "wakuwaku-proof"]
+members = [
+    "wakuwaku",
+    "wakuwaku-entity",
+    "wakuwaku-iggy",
+    "wakuwaku-proof"
+]
 
 [workspace.package]
 edition = "2024"
@@ -9,5 +14,5 @@ repository = "https://github.com/suitsu31-club/wakuwaku"
 homepage = "https://github.com/suitsu31-club/wakuwaku"
 
 [workspace.dependencies]
-tokio = {version = "^1.53", features = ["full"]}
-kanau = {version = "0.6", features = ["message"]}
+tokio = { version = "^1.53", features = ["full"] }
+kanau = { version = "0.6", features = ["message"] }
