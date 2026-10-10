@@ -39,6 +39,9 @@
 //! # }
 //! ```
 
+pub mod collection;
+pub mod dynamic;
+
 use crate::query::{DataSource, Execute};
 use redis::RedisError;
 use redis::aio::{ConnectionLike, MultiplexedConnection};
