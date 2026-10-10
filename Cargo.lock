@@ -5986,6 +5986,7 @@ name = "wakuwaku-entity"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "futures-util",
  "getrandom 0.4.3",
  "kanau",
  "redis",

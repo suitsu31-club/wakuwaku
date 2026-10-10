@@ -25,11 +25,11 @@
 //! # }
 //! ```
 
-use super::{Name, item_key};
 use crate::effect::io::Write;
 use crate::effect::markers::Entity;
 use crate::query::{Execute, Query};
 use crate::redis::RedisSource;
+use crate::redis::{Name, item_key};
 use redis::aio::ConnectionLike;
 use redis::{RedisResult, Script};
 use std::fmt::{self, Debug, Formatter};

@@ -34,11 +34,12 @@
 //! # }
 //! ```
 
-use super::{COLLECTION_PREFIX, Name, item_key, lock_token, millis};
+use super::lock_token;
 use crate::effect::io::Write;
 use crate::effect::markers::Entity;
 use crate::query::{Execute, Query};
 use crate::redis::RedisSource;
+use crate::redis::{Name, item_key, millis, tagged_pair};
 use redis::aio::ConnectionLike;
 use redis::{RedisResult, Script};
 use std::fmt::{self, Debug, Formatter};
@@ -360,23 +361,9 @@ impl<N: Name + ?Sized> RwLock<N> {
         }
     }
 
-    /// The writer and readers keys of `name`.
-    ///
-    /// The braces make `namespace:name` the hash tag of both keys. Both keys
-    /// share everything up to the end of the name, so the first `}` after
-    /// the `{` falls at the same place in both, and the tags are equal.
+    /// The writer and readers keys of `name`, in one cluster hash slot.
     fn keys(&self, name: &N) -> (Vec<u8>, Vec<u8>) {
-        let mut readers = Vec::with_capacity(64);
-        readers.extend_from_slice(COLLECTION_PREFIX.as_bytes());
-        readers.extend_from_slice(b"RwLock:{");
-        readers.extend_from_slice(self.namespace.as_bytes());
-        readers.push(b':');
-        name.write_name(&mut readers);
-        readers.push(b'}');
-        let mut writer = readers.clone();
-        writer.extend_from_slice(b":w");
-        readers.extend_from_slice(b":r");
-        (writer, readers)
+        tagged_pair("RwLock", self.namespace, name, b":w", b":r")
     }
 }
 

@@ -14,7 +14,9 @@
 //! - [`query`]: [`Query`], [`Execute`], [`DataSource`] and the [`Db`] handle.
 //! - `sqlx` (features `sqlx-pg`, `sqlx-mysql`): sqlx data sources and
 //!   transactions written as pure state machines.
-//! - `redis` (feature `redis`): a Redis data source.
+//! - `redis` (feature `redis`): a Redis data source, typed collections
+//!   (caches, locks, a rate limiter), and structures that can be followed as
+//!   they change (pipes, live views, stream buffers).
 //!
 //! # Features
 //!

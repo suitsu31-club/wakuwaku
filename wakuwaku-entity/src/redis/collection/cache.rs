@@ -35,11 +35,11 @@
 //! # }
 //! ```
 
-use super::{Name, corrupted, deserialize_error, item_key, millis, serialize_error};
 use crate::effect::io::{Read, Write};
 use crate::effect::markers::Entity;
 use crate::query::{Execute, Query};
 use crate::redis::RedisSource;
+use crate::redis::{Name, corrupted, deserialize_error, item_key, millis, serialize_error};
 pub use blake3::Hash;
 use kanau::message::{MessageDe, MessageSer};
 use redis::aio::ConnectionLike;
