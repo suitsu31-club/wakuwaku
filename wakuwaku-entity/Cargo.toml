@@ -1,7 +1,7 @@
 [package]
 name = "wakuwaku-entity"
 version = "0.1.0"
-description = "Capability-typed queries, hooks and pure transaction flows over sqlx and Redis"
+description = "Capability-typed queries, hooks and pure transaction flows over sqlx, Redis and Meilisearch"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -15,6 +15,10 @@ redis = { version = "1.0", default-features = false, features = ["tokio-comp", "
 blake3 = { version = "1.8", optional = true }
 getrandom = { version = "0.4", optional = true }
 futures-util = { version = "0.3", default-features = false, optional = true }
+meilisearch-sdk = { version = "0.33", optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
+time = { version = "0.3", optional = true }
 
 [dev-dependencies]
 tokio.workspace = true
@@ -24,6 +28,7 @@ default = ["sqlx-pg"]
 sqlx-pg = ["dep:sqlx", "sqlx/postgres"]
 sqlx-mysql = ["dep:sqlx", "sqlx/mysql"]
 redis = ["dep:redis", "dep:blake3", "dep:getrandom", "dep:futures-util"]
+meilisearch = ["dep:meilisearch-sdk", "dep:serde", "dep:serde_json", "dep:time"]
 
 [package.metadata.docs.rs]
 all-features = true

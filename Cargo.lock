@@ -925,6 +925,15 @@ checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
 
 [[package]]
 name = "convert_case"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "baaaa0ecca5b51987b9423ccdc971514dd8b0bb7b4060b983d3664dad3f1f89f"
+dependencies = [
+ "unicode-segmentation",
+]
+
+[[package]]
+name = "convert_case"
 version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "633458d4ef8c78b72454de2d54fd6ab2e60f9e02be22f3c6104cdc8a4e0fceb9"
@@ -1238,7 +1247,7 @@ version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "10d60334b3b2e7c9d91ef8150abfb6fa4c1c39ebbcf4a81c2e346aad939fee3e"
 dependencies = [
- "thiserror",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -1276,7 +1285,7 @@ version = "2.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "799a97264921d8623a957f6c3b9011f3b5492f557bbb7a5a19b7fa6d06ba8dcb"
 dependencies = [
- "convert_case",
+ "convert_case 0.10.0",
  "proc-macro2",
  "quote",
  "rustc_version",
@@ -1330,7 +1339,7 @@ dependencies = [
  "hashbrown 0.16.1",
  "num-traits",
  "rand 0.9.5",
- "thiserror",
+ "thiserror 2.0.20",
  "tokio",
 ]
 
@@ -1348,7 +1357,7 @@ dependencies = [
  "rand 0.9.5",
  "rand_distr",
  "rayon",
- "thiserror",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -1867,7 +1876,7 @@ dependencies = [
  "rstar 0.8.4",
  "rstar 0.9.3",
  "serde",
- "thiserror",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -2266,6 +2275,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tower-service",
+ "webpki-roots 1.0.9",
 ]
 
 [[package]]
@@ -2500,7 +2510,7 @@ dependencies = [
  "iggy_binary_protocol",
  "iggy_common",
  "quinn",
- "reqwest",
+ "reqwest 0.13.5",
  "reqwest-middleware",
  "reqwest-retry",
  "reqwest-tracing",
@@ -2526,7 +2536,7 @@ dependencies = [
  "bytes",
  "enumset",
  "secrecy",
- "thiserror",
+ "thiserror 2.0.20",
  "twox-hash",
 ]
 
@@ -2557,7 +2567,7 @@ dependencies = [
  "serde_json",
  "serde_with",
  "strum",
- "thiserror",
+ "thiserror 2.0.20",
  "tokio",
  "tracing",
  "tungstenite 0.30.0",
@@ -2619,6 +2629,15 @@ name = "is_terminal_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a6cb138bb79a146c1bd460005623e142ef0181e3d0219cb493e02f7d08a35695"
+
+[[package]]
+name = "iso8601"
+version = "0.6.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4ffd3254cf2b0fc53e38414bdba99719f3e269db8a6519731b68a3a90040c41b"
+dependencies = [
+ "nom",
+]
 
 [[package]]
 name = "itertools"
@@ -2719,7 +2738,7 @@ dependencies = [
  "jni-sys",
  "log",
  "simd_cesu8",
- "thiserror",
+ "thiserror 2.0.20",
  "walkdir",
  "windows-link 0.2.1",
 ]
@@ -2811,7 +2830,7 @@ dependencies = [
  "anyhow",
  "futures",
  "kanau-macro",
- "thiserror",
+ "thiserror 2.0.20",
  "tokio",
  "tokio-stream",
 ]
@@ -2955,6 +2974,49 @@ dependencies = [
 ]
 
 [[package]]
+name = "meilisearch-index-setting-macro"
+version = "0.33.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "93b5b21df781c820a9cc387b808d4128cbc164dd28d67ac6ed666a00996f8f15"
+dependencies = [
+ "convert_case 0.8.0",
+ "proc-macro2",
+ "quote",
+ "structmeta",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "meilisearch-sdk"
+version = "0.33.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "19e6e3646ba2a9a306296c1edf4a050508a408c1b59ca456d9ad4965ec6e91e9"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "either",
+ "futures-channel",
+ "futures-core",
+ "futures-io",
+ "futures-util",
+ "iso8601",
+ "jsonwebtoken",
+ "log",
+ "meilisearch-index-setting-macro",
+ "pin-project-lite",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "time",
+ "tokio",
+ "uuid",
+ "wasm-bindgen-futures",
+ "web-sys",
+ "yaup",
+]
+
+[[package]]
 name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3030,6 +3092,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c16843be85dd410c6a12251c4eca0dd1d3ee8c5725f746c4d5e0fdcec0a864b2"
 dependencies = [
  "num-traits",
+]
+
+[[package]]
+name = "nom"
+version = "8.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df9761775871bdef83bee530e60050f7e54b1105350d6884eb0fb4f46c2f9405"
+dependencies = [
+ "memchr",
 ]
 
 [[package]]
@@ -3189,7 +3260,7 @@ dependencies = [
  "itertools 0.14.0",
  "parking_lot",
  "percent-encoding",
- "thiserror",
+ "thiserror 2.0.20",
  "tokio",
  "tracing",
  "url",
@@ -3630,7 +3701,7 @@ dependencies = [
  "rustc-hash",
  "rustls",
  "socket2",
- "thiserror",
+ "thiserror 2.0.20",
  "tokio",
  "tracing",
  "web-time",
@@ -3655,7 +3726,7 @@ dependencies = [
  "rustls-pki-types",
  "rustls-platform-verifier",
  "slab",
- "thiserror",
+ "thiserror 2.0.20",
  "tinyvec",
  "tracing",
  "web-time",
@@ -3926,6 +3997,48 @@ dependencies = [
 
 [[package]]
 name = "reqwest"
+version = "0.12.28"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147"
+dependencies = [
+ "base64 0.22.1",
+ "bytes",
+ "futures-core",
+ "futures-util",
+ "h2",
+ "http",
+ "http-body",
+ "http-body-util",
+ "hyper",
+ "hyper-rustls",
+ "hyper-util",
+ "js-sys",
+ "log",
+ "percent-encoding",
+ "pin-project-lite",
+ "quinn",
+ "rustls",
+ "rustls-pki-types",
+ "serde",
+ "serde_json",
+ "serde_urlencoded",
+ "sync_wrapper",
+ "tokio",
+ "tokio-rustls",
+ "tokio-util",
+ "tower",
+ "tower-http",
+ "tower-service",
+ "url",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "wasm-streams 0.4.2",
+ "web-sys",
+ "webpki-roots 1.0.9",
+]
+
+[[package]]
+name = "reqwest"
 version = "0.13.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "16a1cfa75cc186dd73d5818e510e042e40927bccc9c236b061cea97e1eb08029"
@@ -3962,7 +4075,7 @@ dependencies = [
  "url",
  "wasm-bindgen",
  "wasm-bindgen-futures",
- "wasm-streams",
+ "wasm-streams 0.5.0",
  "web-sys",
 ]
 
@@ -3975,9 +4088,9 @@ dependencies = [
  "anyhow",
  "async-trait",
  "http",
- "reqwest",
+ "reqwest 0.13.5",
  "serde",
- "thiserror",
+ "thiserror 2.0.20",
  "tower-service",
 ]
 
@@ -3993,10 +4106,10 @@ dependencies = [
  "getrandom 0.2.17",
  "http",
  "hyper",
- "reqwest",
+ "reqwest 0.13.5",
  "reqwest-middleware",
  "retry-policies",
- "thiserror",
+ "thiserror 2.0.20",
  "tokio",
  "tracing",
  "wasmtimer",
@@ -4013,7 +4126,7 @@ dependencies = [
  "getrandom 0.2.17",
  "http",
  "matchit",
- "reqwest",
+ "reqwest 0.13.5",
  "reqwest-middleware",
  "tracing",
 ]
@@ -4707,7 +4820,7 @@ checksum = "0d585997b0ac10be3c5ee635f1bab02d512760d14b7c468801ac8a01d9ae5f1d"
 dependencies = [
  "num-bigint 0.4.8",
  "num-traits",
- "thiserror",
+ "thiserror 2.0.20",
  "time",
 ]
 
@@ -4815,7 +4928,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "smallvec",
- "thiserror",
+ "thiserror 2.0.20",
  "time",
  "tokio",
  "tokio-stream",
@@ -4859,7 +4972,7 @@ dependencies = [
  "sqlx-postgres",
  "sqlx-sqlite",
  "syn 2.0.119",
- "thiserror",
+ "thiserror 2.0.20",
  "tokio",
  "url",
 ]
@@ -4887,7 +5000,7 @@ dependencies = [
  "sha1 0.11.0",
  "sha2 0.11.0",
  "sqlx-core",
- "thiserror",
+ "thiserror 2.0.20",
  "time",
  "tracing",
  "uuid",
@@ -4924,7 +5037,7 @@ dependencies = [
  "smallvec",
  "sqlx-core",
  "stringprep",
- "thiserror",
+ "thiserror 2.0.20",
  "time",
  "tracing",
  "uuid",
@@ -4950,7 +5063,7 @@ dependencies = [
  "percent-encoding",
  "serde",
  "sqlx-core",
- "thiserror",
+ "thiserror 2.0.20",
  "time",
  "tracing",
  "url",
@@ -5027,6 +5140,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
 
 [[package]]
+name = "structmeta"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2e1575d8d40908d70f6fd05537266b90ae71b15dbbe7a8b7dffa2b759306d329"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "structmeta-derive",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "structmeta-derive"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "152a0b65a590ff6c3da95cabe2353ee04e6167c896b28e3b14478c2636c922fc"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "strum"
 version = "0.28.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5068,7 +5204,7 @@ dependencies = [
  "indexmap 2.14.1",
  "js-sys",
  "path-clean",
- "reqwest",
+ "reqwest 0.13.5",
  "ring",
  "rustls",
  "rustls-pki-types",
@@ -5179,7 +5315,7 @@ dependencies = [
  "surrealdb-strand",
  "surrealdb-types",
  "sysinfo",
- "thiserror",
+ "thiserror 2.0.20",
  "tokio",
  "tokio-util",
  "tracing",
@@ -5364,11 +5500,31 @@ dependencies = [
 
 [[package]]
 name = "thiserror"
+version = "1.0.69"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6aaf5339b578ea85b50e080feb250a3e8ae8cfcdff9a461c9ec2904bc923f52"
+dependencies = [
+ "thiserror-impl 1.0.69",
+]
+
+[[package]]
+name = "thiserror"
 version = "2.0.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ec86235f5fcc2a73650310756d2ac5b138a5780bbbdfae3eeccec992c435ba4f"
 dependencies = [
- "thiserror-impl",
+ "thiserror-impl 2.0.20",
+]
+
+[[package]]
+name = "thiserror-impl"
+version = "1.0.69"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4fee6c4efc90059e10f81e6d42c60a18f76588c3d74cb83a0b242a2b6c7504c1"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -5540,7 +5696,7 @@ dependencies = [
  "http",
  "httparse",
  "js-sys",
- "thiserror",
+ "thiserror 2.0.20",
  "tokio",
  "tokio-tungstenite 0.28.0",
  "wasm-bindgen",
@@ -5756,7 +5912,7 @@ dependencies = [
  "rustls",
  "rustls-pki-types",
  "sha1 0.10.7",
- "thiserror",
+ "thiserror 2.0.20",
  "url",
  "utf-8",
 ]
@@ -5776,7 +5932,7 @@ dependencies = [
  "rustls",
  "rustls-pki-types",
  "sha1 0.11.0",
- "thiserror",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -5973,7 +6129,7 @@ dependencies = [
  "redis",
  "sqlx",
  "surrealdb",
- "thiserror",
+ "thiserror 2.0.20",
  "time",
  "tokio",
  "tonic",
@@ -5989,9 +6145,13 @@ dependencies = [
  "futures-util",
  "getrandom 0.4.3",
  "kanau",
+ "meilisearch-sdk",
  "redis",
+ "serde",
+ "serde_json",
  "sqlx",
- "thiserror",
+ "thiserror 2.0.20",
+ "time",
  "tokio",
 ]
 
@@ -6005,7 +6165,7 @@ dependencies = [
  "iggy",
  "kanau",
  "num_enum",
- "thiserror",
+ "thiserror 2.0.20",
  "tokio",
  "tracing",
 ]
@@ -6105,6 +6265,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7ef64dbcc55df09c7e5a46182d181c2cfa3e925f3da937ea764728b4bbb9dcbf"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "wasm-streams"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "15053d8d85c7eccdbefef60f06769760a563c7f0a9d6902a13d35c7800b0ad65"
+dependencies = [
+ "futures-util",
+ "js-sys",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
 ]
 
 [[package]]
@@ -6495,6 +6668,17 @@ name = "xxhash-rust"
 version = "0.8.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aee1b19627c7c60102ab80d3a9cbe18de90bfe03bfa6c3715447681f0e8c8af6"
+
+[[package]]
+name = "yaup"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b0144f1a16a199846cb21024da74edd930b43443463292f536b7110b4855b5c6"
+dependencies = [
+ "form_urlencoded",
+ "serde",
+ "thiserror 1.0.69",
+]
 
 [[package]]
 name = "yoke"

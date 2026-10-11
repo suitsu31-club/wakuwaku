@@ -17,14 +17,18 @@
 //! - `redis` (feature `redis`): a Redis data source, typed collections
 //!   (caches, locks, a rate limiter), and structures that can be followed as
 //!   they change (pipes, live views, stream buffers).
+//! - `meilisearch` (feature `meilisearch`): Meilisearch indexes as entities,
+//!   typed filters, tenant tokens for frontends, and helpers to keep an
+//!   index in sync with its source of truth.
 //!
 //! # Features
 //!
-//! | Feature      | Default | Enables                                   |
-//! |--------------|---------|-------------------------------------------|
-//! | `sqlx-pg`    | yes     | PostgreSQL through sqlx                   |
-//! | `sqlx-mysql` | no      | MySQL through sqlx                        |
-//! | `redis`      | no      | Redis through `redis`                     |
+//! | Feature       | Default | Enables                                   |
+//! |---------------|---------|-------------------------------------------|
+//! | `sqlx-pg`     | yes     | PostgreSQL through sqlx                   |
+//! | `sqlx-mysql`  | no      | MySQL through sqlx                        |
+//! | `redis`       | no      | Redis through `redis`                     |
+//! | `meilisearch` | no      | Meilisearch through `meilisearch-sdk`     |
 //!
 //! # What the types prove
 //!
@@ -43,6 +47,8 @@
 #![warn(missing_docs)]
 
 pub mod effect;
+#[cfg(feature = "meilisearch")]
+pub mod meilisearch;
 pub mod query;
 #[cfg(feature = "redis")]
 pub mod redis;
