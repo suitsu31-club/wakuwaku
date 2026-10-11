@@ -28,7 +28,7 @@
 //! Requesting an unregistered type fails to compile:
 //!
 //! ```compile_fail
-//! use wakuwaku::service_register::ServiceBuilder;
+//! use wakuwaku::services::builder::ServiceBuilder;
 //!
 //! let services = ServiceBuilder::new(1u32);
 //! let _: &String = services.provide::<String, _>();
@@ -48,11 +48,8 @@
 //! assert_eq!(*services.provide::<u32, There<Here>>(), 1);
 //! ```
 
-#[cfg(feature = "amqprs")]
-use crate::integration::amqp::{AmqpMessageProcessor, AmqpMessageSend};
-
-#[cfg(any(feature = "amqprs", feature = "tonic"))]
 use crate::services::ServiceCreation;
+use crate::services::cron_job::{CronJob, CronRegisterCenter, CronRegisterCenterBuilder};
 use std::marker::PhantomData;
 
 /// A node in the type-level service list.
@@ -94,37 +91,61 @@ impl<Head, Chain> ServiceBuilder<Head, Chain> {
         <Self as ProvideAt<T, I>>::provide_at(self)
     }
 
-    /// Create an AMQP consumer from a registered dependency and start a
-    /// consumer list.
+    /// Create a cron job from a registered dependency and start a job list.
     ///
-    /// `Consumer`'s [`Dep`](ServiceCreation::Dep) is looked up at `Position`
-    /// and cloned. The consumer is then created with
+    /// `Job`'s [`Dep`](ServiceCreation::Dep) is looked up at `Position` and
+    /// cloned. The job is then created with
+    /// [`create_service`](ServiceCreation::create_service) and becomes the
+    /// first entry of a new [`CronRegisterCenter`]. The returned builder
+    /// takes ownership of `self`. Chain more `cron_job` calls on it, then
+    /// call `start` or `into_parts`.
+    ///
+    /// `Position` can usually be passed as `_`; it is inferred when the
+    /// dependency's type is registered exactly once. See the
+    /// [`cron_job` module documentation](super::cron_job) for an example.
+    pub fn cron_job<Job, Position>(self) -> CronRegisterCenterBuilder<Head, Chain, Job, ()>
+    where
+        Job: CronJob + ServiceCreation,
+        Position: ServiceBuilderPosition,
+        Self: ProvideAt<Job::Dep, Position>,
+    {
+        let dep = self.provide::<Job::Dep, Position>().clone();
+        let register_center = CronRegisterCenter::new(Job::create_service(dep));
+        CronRegisterCenterBuilder::new(self, register_center)
+    }
+
+    /// Create an Iggy event handler from a registered dependency and start a
+    /// handler list.
+    ///
+    /// `Handler`'s [`Dep`](ServiceCreation::Dep) is looked up at `Position`
+    /// and cloned. The handler is then created with
     /// [`create_service`](ServiceCreation::create_service), wrapped in an
     /// `Arc`, and becomes the first entry of a new
-    /// [`AmqpConsumerRegisterCenter`](super::amqp_consumer::AmqpConsumerRegisterCenter).
+    /// [`IggyConsumerRegisterCenter`](wakuwaku_iggy::IggyConsumerRegisterCenter).
     /// The returned builder takes ownership of `self`. Chain more
-    /// `amqp_consumer` calls on it, then call `setup` or `into_parts`.
+    /// `iggy_consumer` calls on it, then call `start` or `into_parts`.
     ///
     /// `Event` and `Position` can usually be passed as `_`. The event is
-    /// inferred when `Consumer` implements [`AmqpMessageProcessor`] for only
-    /// one event. The position is inferred when the dependency's type is
-    /// registered exactly once. See the
-    /// [`amqp_consumer` module documentation](super::amqp_consumer#building-consumers-from-a-servicebuilder)
-    /// for an example.
-    #[cfg(feature = "amqprs")]
-    pub fn amqp_consumer<Consumer, Event, Position>(
+    /// inferred when `Handler` implements
+    /// [`EventHandler`](wakuwaku_iggy::EventHandler) for only one event. The
+    /// position is inferred when the dependency's type is registered exactly
+    /// once. See the
+    /// [`iggy_consumer` module documentation](super::iggy_consumer) for an
+    /// example.
+    #[cfg(feature = "iggy")]
+    pub fn iggy_consumer<Handler, Event, Position>(
         self,
-    ) -> super::amqp_consumer::AmqpConsumerRegisterCenterBuilder<Head, Chain, Consumer, Event, ()>
+    ) -> super::iggy_consumer::IggyConsumerRegisterCenterBuilder<Head, Chain, Handler, Event, ()>
     where
+        Handler: wakuwaku_iggy::EventHandler<Event> + ServiceCreation,
+        Event: wakuwaku_iggy::Event,
         Position: ServiceBuilderPosition,
-        Consumer: AmqpMessageProcessor<Event> + ServiceCreation,
-        Event: AmqpMessageSend + kanau::message::MessageDe,
-        Self: ProvideAt<Consumer::Dep, Position>,
+        Self: ProvideAt<Handler::Dep, Position>,
     {
-        let service_dep: Consumer::Dep = self.provide::<Consumer::Dep, Position>().clone();
-        let new_service = std::sync::Arc::new(Consumer::create_service(service_dep));
-        let register_center = super::amqp_consumer::AmqpConsumerRegisterCenter::new(new_service);
-        super::amqp_consumer::AmqpConsumerRegisterCenterBuilder::new(self, register_center)
+        let dep = self.provide::<Handler::Dep, Position>().clone();
+        let handler = std::sync::Arc::new(Handler::create_service(dep));
+        let register_center = wakuwaku_iggy::IggyConsumerRegisterCenter::new(handler);
+        super::iggy_consumer::IggyConsumerRegisterCenterBuilder::new(self, register_center)
     }
 
     /// Create a gRPC service implementation from a registered dependency,
@@ -144,7 +165,7 @@ impl<Head, Chain> ServiceBuilder<Head, Chain> {
     /// dependency's type is registered exactly once. See the
     /// [`grpc_service` module documentation](super::grpc_service#building-servers-from-a-servicebuilder)
     /// for an example.
-    #[cfg(feature = "tonic")]
+    #[cfg(feature = "grpc")]
     pub fn grpc_service<Server, ServiceImpl, Position>(
         self,
         into_server: impl FnOnce(ServiceImpl) -> Server,

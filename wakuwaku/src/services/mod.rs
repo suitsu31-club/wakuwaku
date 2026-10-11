@@ -1,24 +1,34 @@
-//! Service composition helpers: a type-indexed service registry, the
-//! [`ServiceCreation`] trait for building services from registered
-//! dependencies, and, with the `amqprs` feature, grouped RabbitMQ consumer
-//! setup and, with the `tonic` feature, grouped gRPC server registration.
+//! Building a service's components from shared dependencies.
+//!
+//! [`ServiceBuilder`](builder::ServiceBuilder) holds the shared
+//! dependencies, and every component that implements [`ServiceCreation`] is
+//! built from one of them. Each kind of component has its own register
+//! center, a type-level list filled straight from the service builder:
+//!
+//! | Component     | Trait                          | Module            | Feature |
+//! |---------------|--------------------------------|-------------------|---------|
+//! | Cron job      | [`CronJob`](cron_job::CronJob) | [`cron_job`]      |         |
+//! | gRPC server   | `grpc_service::RoutableService`| `grpc_service`    | `grpc`  |
+//! | Event handler | `wakuwaku_iggy::EventHandler`  | `iggy_consumer`   | `iggy`  |
 
 pub mod builder;
+pub mod cron_job;
 
-#[cfg(feature = "amqprs")]
-pub mod amqp_consumer;
-
-#[cfg(feature = "tonic")]
+#[cfg(feature = "grpc")]
 pub mod grpc_service;
 
-/// A service that can be constructed from a single dependency.
+#[cfg(feature = "iggy")]
+pub mod iggy_consumer;
+
+/// A component that can be constructed from a single dependency.
 ///
-/// With the `amqprs` feature, `ServiceBuilder::amqp_consumer` uses it to
-/// create consumers, and with the `tonic` feature, `ServiceBuilder::grpc_service`
-/// uses it to create gRPC service implementations, from services already
-/// registered in a [`ServiceBuilder`](builder::ServiceBuilder).
+/// [`ServiceBuilder::cron_job`](builder::ServiceBuilder::cron_job),
+/// `ServiceBuilder::grpc_service` (feature `grpc`) and
+/// `ServiceBuilder::iggy_consumer` (feature `iggy`) use it to create
+/// components from services already registered in a
+/// [`ServiceBuilder`](builder::ServiceBuilder).
 ///
-/// The dependency is looked up by its type. If a service needs several
+/// The dependency is looked up by its type. If a component needs several
 /// dependencies, register a struct (or tuple) that holds them all and use
 /// that as `Dep`.
 pub trait ServiceCreation {

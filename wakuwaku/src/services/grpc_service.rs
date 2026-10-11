@@ -16,13 +16,14 @@
 //! # Example
 //!
 //! ```no_run
-//! use tonic::service::Routes;
-//! use tonic::transport::Server;
+//! use wakuwaku::deps::tonic;
+//! use wakuwaku::deps::tonic::service::Routes;
+//! use wakuwaku::deps::tonic::transport::Server;
 //! use wakuwaku::services::grpc_service::GrpcServiceRegisterCenter;
 //! # use std::convert::Infallible;
 //! # use std::task::{Context, Poll};
-//! # use tonic::body::Body;
-//! # use tonic::codegen::{BoxFuture, Service, http};
+//! # use wakuwaku::deps::tonic::body::Body;
+//! # use wakuwaku::deps::tonic::codegen::{BoxFuture, Service, http};
 //! # macro_rules! server {
 //! #     ($server:ident, $service:ident, $name:literal) => {
 //! #         pub trait $service: Send + Sync + 'static {}
@@ -112,14 +113,15 @@
 //! service builder.
 //!
 //! ```no_run
-//! use tonic::service::Routes;
-//! use tonic::transport::Server;
+//! use wakuwaku::deps::tonic::service::Routes;
+//! use wakuwaku::deps::tonic::transport::Server;
 //! use wakuwaku::services::ServiceCreation;
 //! use wakuwaku::services::builder::ServiceBuilder;
 //! # use std::convert::Infallible;
 //! # use std::task::{Context, Poll};
-//! # use tonic::body::Body;
-//! # use tonic::codegen::{BoxFuture, Service, http};
+//! # use wakuwaku::deps::tonic;
+//! # use wakuwaku::deps::tonic::body::Body;
+//! # use wakuwaku::deps::tonic::codegen::{BoxFuture, Service, http};
 //! # macro_rules! server {
 //! #     ($server:ident, $service:ident, $name:literal) => {
 //! #         pub trait $service: Send + Sync + 'static {}

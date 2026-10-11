@@ -1,78 +1,98 @@
 # wakuwaku
 
-`wakuwaku` is a small async utility crate for backend services that use:
+`wakuwaku` is a proof-driven microservice framework for Rust.
 
-- RabbitMQ (`amqprs`)
-- PostgreSQL (`sqlx`)
-- Redis (`redis`)
-- shared connection pooling helpers
+It wires a service together: every component (gRPC server, event handler, cron job) is built from a type-level registry of shared dependencies, and the crates that do the actual work are re-exported behind feature flags, so a service depends on `wakuwaku` alone.
 
-It provides reusable building blocks for message publishing/consuming, Redis key-value helpers, SQLx pool wrapping, and common error handling.
+## Proof-driven programming
+
+- **Macro correctness** (how components fit together) is proven by traits and checked by the compiler. A component whose dependency was never registered, a write query run through a read-only handle, or a cron job with a zero interval does not build.
+- **Micro correctness** (what one component does) is proven by unit tests. Every component is a plain value implementing a `kanau::processor::Processor`-based trait, so a test calls it directly, without starting the service.
+
+## Crates
+
+| Crate             | Re-exported as      | Provides                                                                 |
+|-------------------|---------------------|--------------------------------------------------------------------------|
+| `wakuwaku`        |                     | `ServiceBuilder`, gRPC registration, cron jobs, Iggy consumer registration |
+| `wakuwaku-entity` | `wakuwaku::entity`  | Capability-typed queries and transactions over sqlx, Redis, Meilisearch  |
+| `wakuwaku-iggy`   | `wakuwaku::iggy`    | Typed events on Apache Iggy with per-key ordering and algebraic batching |
+| `wakuwaku-proof`  | `wakuwaku::proof`   | Proof-carrying validation                                                |
+
+Third-party crates that appear in these APIs (`kanau`, `tonic`, `iggy`, `sqlx`, `redis`, `meilisearch_sdk`) are re-exported under `wakuwaku::deps`.
 
 ## Features
 
-Default features:
-
-- `amqprs`
-- `sqlx`
-- `redis`
-- `uuid`
-- `tracing`
-
-Optional feature:
-
-- `tracing-otel` (enables OpenTelemetry-style metric hooks through `tracing`)
-
-## Installation
+| Feature       | Default | Enables                                              |
+|---------------|---------|------------------------------------------------------|
+| `grpc`        | yes     | gRPC server registration, `deps::tonic`              |
+| `proof`       | yes     | `wakuwaku::proof`                                    |
+| `iggy`        | no      | `wakuwaku::iggy`, Iggy consumer registration, `deps::iggy` |
+| `entity`      | no      | `wakuwaku::entity` without a data source             |
+| `sqlx-pg`     | no      | `entity` with PostgreSQL, `deps::sqlx`               |
+| `sqlx-mysql`  | no      | `entity` with MySQL, `deps::sqlx`                    |
+| `redis`       | no      | `entity` with Redis, `deps::redis`                   |
+| `meilisearch` | no      | `entity` with Meilisearch, `deps::meilisearch_sdk`   |
 
 ```toml
 [dependencies]
-wakuwaku = "0.1"
+wakuwaku = { version = "1.0.0-rc1", features = ["iggy", "sqlx-pg", "redis"] }
 ```
-
-Disable default features if you only need specific modules:
-
-```toml
-[dependencies]
-wakuwaku = { version = "0.1", default-features = false, features = ["redis"] }
-```
-
-## Module overview
-
-- `wakuwaku::amqp`  
-  Traits and utilities for exchange/queue setup, message sending, and consumer wiring.
-- `wakuwaku::redis`  
-  `KeyValue`/`KeyValueRead`/`KeyValueWrite` traits for typed Redis get/set/delete with binary payloads.
-- `wakuwaku::sqlx`  
-  `DatabaseProcessor` wrapper around `sqlx::PgPool`.
-- `wakuwaku::pool`  
-  Generic bounded async resource pool.
-- `wakuwaku::services`  
-  `ServiceBuilder` (compile-time, type-indexed service registry), `ServiceCreation` (build a service from a registered dependency), and, with `amqprs`, `AmqpConsumerRegisterCenter` for starting a group of consumers together. `ServiceBuilder::amqp_consumer::<Consumer, _, _>()` builds each consumer from its registered dependency and ends with `.setup(&pool)`. With `tonic`, `GrpcServiceRegisterCenter` collects gRPC servers; `ServiceBuilder::grpc_service::<XxxServer<_>, ServiceImpl, _>(XxxServer::new)` builds each server from its implementation's registered dependency and ends with `.into_router_fn()`, an `impl FnOnce(Router<L>) -> Router<L>` that adds every server to a tonic router.
-- `wakuwaku::error`  
-  Unified error type used across features.
 
 ## Example
 
 ```rust
-use wakuwaku::redis::{KeyValue, KeyValueRead, KeyValueWrite, RedisConnection, RedisKey};
+use std::time::Duration;
+use wakuwaku::deps::kanau::processor::Processor;
+use wakuwaku::{CronJob, CronTick, ServiceBuilder, ServiceCreation};
 
 #[derive(Clone)]
-struct Session {
-    key: RedisKey,
-    value: Vec<u8>,
+struct SessionStore;
+
+struct ExpireSessions { store: SessionStore }
+
+impl ServiceCreation for ExpireSessions {
+    type Dep = SessionStore;
+    fn create_service(store: SessionStore) -> Self { Self { store } }
 }
 
-impl KeyValue for Session {
-    type Key = RedisKey;
-    type Value = Vec<u8>;
+impl Processor<CronTick> for ExpireSessions {
+    type Output = ();
+    type Error = std::convert::Infallible;
+    async fn process(&self, _tick: CronTick) -> Result<(), Self::Error> {
+        // Scan for expired sessions and delete them.
+        Ok(())
+    }
+}
 
-    fn key(&self) -> Self::Key { self.key.clone() }
-    fn value(&self) -> Self::Value { self.value.clone() }
-    fn into_value(self) -> Self::Value { self.value }
-    fn new(key: Self::Key, value: Self::Value) -> Self { Self { key, value } }
+impl CronJob for ExpireSessions {
+    const INTERVAL: Duration = Duration::from_secs(60);
+}
+
+#[tokio::main]
+async fn main() {
+    let (services, cron) = ServiceBuilder::new(SessionStore)
+        .cron_job::<ExpireSessions, _>()
+        .start();
+
+    // Build gRPC servers and Iggy handlers from `services` the same way:
+    // `services.grpc_service::<XxxServer<_>, Impl, _>(XxxServer::new)`,
+    // `services.iggy_consumer::<Handler, _, _>()`.
+    let _ = services;
+
+    tokio::signal::ctrl_c().await.ok();
+    cron.shutdown().await;
 }
 ```
+
+Cron jobs run locally, each on a fixed grid of `INTERVAL`. Runs of one job never overlap, and a run that overruns skips the ticks it covered. Every replica runs its own jobs, so make jobs idempotent or partition their work.
+
+## Migrating from 0.3
+
+- RabbitMQ is gone: `integration::amqp`, `services::amqp_consumer` and `ServiceBuilder::amqp_consumer` are replaced by `wakuwaku::iggy` and `ServiceBuilder::iggy_consumer`.
+- `interval_job::IntervalJobExecutionSignal` is replaced by `CronJob`, which runs in the process instead of signalling a consumer.
+- `integration::redis`, `integration::sqlx` and `pool` are replaced by `wakuwaku::entity`. `integration::surreal` is removed.
+- `wakuwaku::Error` is removed; each crate has its own error type.
+- The `tonic` feature is renamed to `grpc`.
 
 ## License
 
