@@ -124,7 +124,9 @@ use iggy::prelude::IggyClient;
 use std::sync::Arc;
 use wakuwaku_iggy::consumer::handler::HandlerList;
 use wakuwaku_iggy::error::Error;
-use wakuwaku_iggy::{ConsumerConfig, ConsumerRuntime, Event, EventHandler, IggyConsumerRegisterCenter};
+use wakuwaku_iggy::{
+    ConsumerConfig, ConsumerRuntime, Event, EventHandler, IggyConsumerRegisterCenter,
+};
 
 /// Registers [`ServiceCreation`] event handlers built from a
 /// [`ServiceBuilder`].
@@ -201,12 +203,7 @@ where
     }
 
     /// Split into the service builder and the unstarted handler list.
-    pub fn into_parts(
-        self,
-    ) -> (
-        ServiceBuilder<SH, SC>,
-        IggyConsumerRegisterCenter<H, E, IC>,
-    ) {
+    pub fn into_parts(self) -> (ServiceBuilder<SH, SC>, IggyConsumerRegisterCenter<H, E, IC>) {
         (self.builder, self.register_center)
     }
 }

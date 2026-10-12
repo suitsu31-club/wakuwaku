@@ -35,7 +35,11 @@ pub struct AfterTransaction<D, H, EH> {
 impl<D, H, EH> AfterTransaction<D, H, EH> {
     /// Wrap `inner`, sending hook errors to `on_error`.
     pub const fn new(inner: D, hook: H, on_error: EH) -> Self {
-        Self { inner, hook, on_error }
+        Self {
+            inner,
+            hook,
+            on_error,
+        }
     }
 
     /// The wrapped handle.

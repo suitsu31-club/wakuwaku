@@ -198,9 +198,7 @@ where
         proof.map_evidence(|abac| match abac {
             Or::Left(Evidence(And(a, b))) => And(a, Evidence(Or::Left(b))),
             Or::Right(Evidence(And(a, c))) => And(a, Evidence(Or::Right(c))),
-            Or::Both(Evidence(And(a, b)), Evidence(And(_, c))) => {
-                And(a, Evidence(Or::Both(b, c)))
-            }
+            Or::Both(Evidence(And(a, b)), Evidence(And(_, c))) => And(a, Evidence(Or::Both(b, c))),
         })
     }
 }
@@ -213,9 +211,7 @@ where
     fn term_derive(proof: Proven<T, Self>) -> Proven<T, And<Or<A, B>, Or<A, C>>> {
         proof.map_evidence(|abc| match abc {
             Or::Left(a) => And(Evidence(Or::Left(a.duplicate())), Evidence(Or::Left(a))),
-            Or::Right(Evidence(And(b, c))) => {
-                And(Evidence(Or::Right(b)), Evidence(Or::Right(c)))
-            }
+            Or::Right(Evidence(And(b, c))) => And(Evidence(Or::Right(b)), Evidence(Or::Right(c))),
             Or::Both(a, Evidence(And(b, c))) => And(
                 Evidence(Or::Both(a.duplicate(), b)),
                 Evidence(Or::Both(a, c)),

@@ -188,7 +188,10 @@ impl<F: TxFlow> Begin<F> {
 
     /// No connection, or `BEGIN` failed.
     pub fn failed(self, error: ::sqlx::Error) -> Done<F> {
-        Done { output: Err(TxError::Begin(error)), report: None }
+        Done {
+            output: Err(TxError::Begin(error)),
+            report: None,
+        }
     }
 }
 
@@ -335,25 +338,40 @@ mod tests {
         const ISOLATION: Option<IsolationLevel> = Some(IsolationLevel::Serializable);
 
         fn start(self) -> Step<Self> {
-            Step::Run { next: Check::Reading(Vec::new()), query: Canned(0, Default::default()) }
+            Step::Run {
+                next: Check::Reading(Vec::new()),
+                query: Canned(0, Default::default()),
+            }
         }
 
         fn resume(self, output: Result<i64, ::sqlx::Error>) -> Step<Self> {
             let Check::Reading(mut seen) = self else {
-                return Step::Rollback { output: "bad state".into(), report: Vec::new() };
+                return Step::Rollback {
+                    output: "bad state".into(),
+                    report: Vec::new(),
+                };
             };
             match output {
                 Ok(balance) if balance > 0 => {
                     seen.push(format!("ok {balance}"));
-                    Step::Commit { output: balance, report: seen }
+                    Step::Commit {
+                        output: balance,
+                        report: seen,
+                    }
                 }
                 Ok(balance) => {
                     seen.push(format!("ok {balance}"));
-                    Step::Rollback { output: "not positive".into(), report: seen }
+                    Step::Rollback {
+                        output: "not positive".into(),
+                        report: seen,
+                    }
                 }
                 Err(error) => {
                     seen.push(format!("err {error}"));
-                    Step::Rollback { output: "client error".into(), report: seen }
+                    Step::Rollback {
+                        output: "client error".into(),
+                        report: seen,
+                    }
                 }
             }
         }
@@ -413,7 +431,13 @@ mod tests {
     fn mode_is_read_only_iff_effect_only_reads() {
         let read = Begin::new(ReadCheck::init()).mode();
         let write = Begin::new(WriteCheck::init()).mode();
-        assert_eq!(read, TxMode { isolation: Some(IsolationLevel::Serializable), read_only: true });
+        assert_eq!(
+            read,
+            TxMode {
+                isolation: Some(IsolationLevel::Serializable),
+                read_only: true
+            }
+        );
         assert!(!write.read_only);
     }
 
@@ -431,7 +455,10 @@ mod tests {
         };
         let done = committing.committed(Ok(()));
         assert!(matches!(done.output, Ok(TxOutput::Committed(5))));
-        assert_eq!(done.report, Some(TxFinalState::Committed(vec!["ok 5".into()])));
+        assert_eq!(
+            done.report,
+            Some(TxFinalState::Committed(vec!["ok 5".into()]))
+        );
     }
 
     #[test]
@@ -441,7 +468,10 @@ mod tests {
         };
         let done = rolling_back.rolled_back();
         assert!(matches!(&done.output, Ok(TxOutput::RolledBack(why)) if why == "not positive"));
-        assert_eq!(done.report, Some(TxFinalState::RolledBack(vec!["ok 0".into()])));
+        assert_eq!(
+            done.report,
+            Some(TxFinalState::RolledBack(vec!["ok 0".into()]))
+        );
     }
 
     #[test]
@@ -466,7 +496,10 @@ mod tests {
             assert!(
                 matches!(&done.output, Ok(TxOutput::RolledBack(why)) if why.starts_with("aborted"))
             );
-            assert_eq!(done.report, Some(TxFinalState::RolledBack(vec!["aborted".into()])));
+            assert_eq!(
+                done.report,
+                Some(TxFinalState::RolledBack(vec!["aborted".into()]))
+            );
         }
     }
 

@@ -204,6 +204,9 @@
     clippy::panic_in_result_fn,
     clippy::arithmetic_side_effects
 )]
+#![doc(
+    html_logo_url = "https://raw.githubusercontent.com/suitsu31-club/wakuwaku-docs/main/icon.svg"
+)]
 #![warn(missing_docs)]
 
 pub mod consumer;

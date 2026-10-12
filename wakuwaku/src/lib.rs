@@ -59,6 +59,9 @@
     clippy::arithmetic_side_effects
 )]
 #![warn(missing_docs)]
+#![doc(
+    html_logo_url = "https://raw.githubusercontent.com/suitsu31-club/wakuwaku-docs/main/icon.svg"
+)]
 
 pub mod services;
 

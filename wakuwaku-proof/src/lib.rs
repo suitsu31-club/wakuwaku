@@ -4,9 +4,10 @@
     clippy::panic_in_result_fn,
     clippy::arithmetic_side_effects
 )]
-
 #![warn(missing_docs)]
-
+#![doc(
+    html_logo_url = "https://raw.githubusercontent.com/suitsu31-club/wakuwaku-docs/main/icon.svg"
+)]
 #![doc = include_str!("../README.md")]
 
 pub mod boolean_algebra;
@@ -243,10 +244,7 @@ impl<T: Eq, A, B> Proven<T, And<A, B>> {
     /// # Errors
     ///
     /// Returns both proofs unchanged if the subjects differ.
-    pub fn from_both(
-        a: Proven<T, A>,
-        b: Proven<T, B>,
-    ) -> Result<Self, Mismatched<T, A, B>> {
+    pub fn from_both(a: Proven<T, A>, b: Proven<T, B>) -> Result<Self, Mismatched<T, A, B>> {
         if a.subject != b.subject {
             return Err((a, b));
         }
@@ -514,4 +512,3 @@ pub trait TermDerive<P, T, R>: Predicate<T> {
     /// `Self` held for the subject, so `P` holds for it.
     fn term_derive(proof: Proven<T, Self>) -> Proven<T, P>;
 }
-

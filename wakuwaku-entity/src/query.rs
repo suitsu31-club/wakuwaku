@@ -100,7 +100,10 @@ impl<S, C> Db<S, C> {
     /// Only build a capability that writes from a source connected to a
     /// writable database.
     pub const fn new(source: S) -> Self {
-        Self { source, capability: PhantomData }
+        Self {
+            source,
+            capability: PhantomData,
+        }
     }
 
     #[allow(unused)]

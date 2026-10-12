@@ -400,7 +400,10 @@ mod tests {
     fn next_tick_keeps_a_grid_point_reached_exactly() {
         let start = Instant::now();
         assert_eq!(next_tick(start, start + PERIOD, PERIOD), start + PERIOD);
-        assert_eq!(next_tick(start, start + PERIOD * 3, PERIOD), start + PERIOD * 3);
+        assert_eq!(
+            next_tick(start, start + PERIOD * 3, PERIOD),
+            start + PERIOD * 3
+        );
     }
 
     #[test]
@@ -445,7 +448,10 @@ mod tests {
         cron.shutdown().await;
 
         let offsets: Vec<Duration> = starts.lock().await.iter().map(|s| *s - origin).collect();
-        assert_eq!(offsets, [Duration::ZERO, PERIOD * 3, PERIOD * 4, PERIOD * 5]);
+        assert_eq!(
+            offsets,
+            [Duration::ZERO, PERIOD * 3, PERIOD * 4, PERIOD * 5]
+        );
     }
 
     /// Fails on run 0, panics on run 1, succeeds afterwards.
