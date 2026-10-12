@@ -60,7 +60,7 @@ use crate::redis::{
 use futures_util::Stream;
 use kanau::message::{MessageDe, MessageSer};
 use redis::aio::ConnectionLike;
-use redis::{RedisResult, Script};
+use redis::{RedisError, RedisResult, Script};
 use std::fmt::{self, Debug, Formatter};
 use std::marker::PhantomData;
 use std::sync::LazyLock;
@@ -270,6 +270,7 @@ where
     C: ConnectionLike + Clone + Send + Sync,
 {
     type Output = Option<u64>;
+    type Error = RedisError;
 
     async fn execute(self, conn: &mut C) -> RedisResult<Option<u64>> {
         let body = self.body.to_bytes().map_err(serialize_error)?;
@@ -300,6 +301,7 @@ where
     C: ConnectionLike + Clone + Send + Sync,
 {
     type Output = bool;
+    type Error = RedisError;
 
     async fn execute(self, conn: &mut C) -> RedisResult<bool> {
         FINISH
@@ -337,6 +339,7 @@ where
     C: ConnectionLike + Clone + Send + Sync,
 {
     type Output = Contents<B>;
+    type Error = RedisError;
 
     async fn execute(self, conn: &mut C) -> RedisResult<Contents<B>> {
         let reply = redis::cmd("XRANGE")
@@ -387,6 +390,7 @@ where
     D: ConnectionLike + Send,
 {
     type Output = StreamBufferSubscription<B, D>;
+    type Error = RedisError;
 
     async fn execute(self, _: &mut C) -> RedisResult<StreamBufferSubscription<B, D>> {
         Ok(StreamBufferSubscription {
@@ -476,6 +480,7 @@ where
     C: ConnectionLike + Clone + Send + Sync,
 {
     type Output = bool;
+    type Error = RedisError;
 
     async fn execute(self, conn: &mut C) -> RedisResult<bool> {
         redis::cmd("UNLINK").arg(&self.key).query_async(conn).await

@@ -43,7 +43,7 @@ use crate::redis::{Name, corrupted, deserialize_error, item_key, millis, seriali
 pub use blake3::Hash;
 use kanau::message::{MessageDe, MessageSer};
 use redis::aio::ConnectionLike;
-use redis::{RedisResult, Script};
+use redis::{RedisError, RedisResult, Script};
 use std::fmt::{self, Debug, Formatter};
 use std::marker::PhantomData;
 use std::sync::LazyLock;
@@ -159,6 +159,7 @@ where
     C: ConnectionLike + Clone + Send + Sync,
 {
     type Output = Option<B>;
+    type Error = RedisError;
 
     async fn execute(self, conn: &mut C) -> RedisResult<Option<B>> {
         let bytes: Option<Vec<u8>> = redis::cmd("GET").arg(&self.key).query_async(conn).await?;
@@ -187,6 +188,7 @@ where
     C: ConnectionLike + Clone + Send + Sync,
 {
     type Output = ();
+    type Error = RedisError;
 
     async fn execute(self, conn: &mut C) -> RedisResult<()> {
         let body = self.body.to_bytes().map_err(serialize_error)?;
@@ -216,6 +218,7 @@ where
     C: ConnectionLike + Clone + Send + Sync,
 {
     type Output = bool;
+    type Error = RedisError;
 
     async fn execute(self, conn: &mut C) -> RedisResult<bool> {
         unlink(&self.key, conn).await
@@ -350,6 +353,7 @@ where
     C: ConnectionLike + Clone + Send + Sync,
 {
     type Output = Option<Hashed<B>>;
+    type Error = RedisError;
 
     async fn execute(self, conn: &mut C) -> RedisResult<Option<Hashed<B>>> {
         let fields: (Option<Vec<u8>>, Option<Vec<u8>>) = redis::cmd("HMGET")
@@ -382,6 +386,7 @@ where
     C: ConnectionLike + Clone + Send + Sync,
 {
     type Output = Option<Hash>;
+    type Error = RedisError;
 
     async fn execute(self, conn: &mut C) -> RedisResult<Option<Hash>> {
         let hash: Option<Vec<u8>> = redis::cmd("HGET")
@@ -411,6 +416,7 @@ where
     C: ConnectionLike + Clone + Send + Sync,
 {
     type Output = Freshness<B>;
+    type Error = RedisError;
 
     async fn execute(self, conn: &mut C) -> RedisResult<Freshness<B>> {
         let reply: Vec<redis::Value> = GET_IF_CHANGED
@@ -450,6 +456,7 @@ where
     C: ConnectionLike + Clone + Send + Sync,
 {
     type Output = Hash;
+    type Error = RedisError;
 
     async fn execute(self, conn: &mut C) -> RedisResult<Hash> {
         let body = self.body.to_bytes().map_err(serialize_error)?;
@@ -489,6 +496,7 @@ where
     C: ConnectionLike + Clone + Send + Sync,
 {
     type Output = bool;
+    type Error = RedisError;
 
     async fn execute(self, conn: &mut C) -> RedisResult<bool> {
         unlink(&self.key, conn).await

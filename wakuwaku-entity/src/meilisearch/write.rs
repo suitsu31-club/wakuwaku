@@ -55,6 +55,7 @@ impl<I: SearchIndex> Query for Upsert<I> {
 
 impl<I: SearchIndex> Execute<MeiliSource> for Upsert<I> {
     type Output = TaskInfo;
+    type Error = Error;
 
     async fn execute(self, client: &mut Arc<Client>) -> Result<TaskInfo, Error> {
         upsert::<I>(client, I::UID, &self.documents).await
@@ -107,6 +108,7 @@ impl<I: SearchIndex> Query for Delete<I> {
 
 impl<I: SearchIndex> Execute<MeiliSource> for Delete<I> {
     type Output = TaskInfo;
+    type Error = Error;
 
     async fn execute(self, client: &mut Arc<Client>) -> Result<TaskInfo, Error> {
         client.index(I::UID).delete_documents(&self.keys).await
@@ -151,6 +153,7 @@ impl<I: SearchIndex> Query for ApplySettings<I> {
 
 impl<I: SearchIndex> Execute<MeiliSource> for ApplySettings<I> {
     type Output = TaskInfo;
+    type Error = Error;
 
     async fn execute(self, client: &mut Arc<Client>) -> Result<TaskInfo, Error> {
         apply_settings::<I>(client, I::UID).await
@@ -200,6 +203,7 @@ impl Query for WaitTask {
 
 impl Execute<MeiliSource> for WaitTask {
     type Output = ();
+    type Error = Error;
 
     async fn execute(self, client: &mut Arc<Client>) -> Result<(), Error> {
         wait(client, &self.task, self.timeout, None).await

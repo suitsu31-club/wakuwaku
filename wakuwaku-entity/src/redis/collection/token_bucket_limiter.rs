@@ -31,7 +31,7 @@ use crate::query::{Execute, Query};
 use crate::redis::RedisSource;
 use crate::redis::{Name, item_key};
 use redis::aio::ConnectionLike;
-use redis::{RedisResult, Script};
+use redis::{RedisError, RedisResult, Script};
 use std::fmt::{self, Debug, Formatter};
 use std::marker::PhantomData;
 use std::num::NonZeroU64;
@@ -245,6 +245,7 @@ where
     C: ConnectionLike + Clone + Send + Sync,
 {
     type Output = Admission;
+    type Error = RedisError;
 
     async fn execute(self, conn: &mut C) -> RedisResult<Admission> {
         let (allowed, retry_after, remaining): (i64, i64, i64) = ACQUIRE
@@ -283,6 +284,7 @@ where
     C: ConnectionLike + Clone + Send + Sync,
 {
     type Output = bool;
+    type Error = RedisError;
 
     async fn execute(self, conn: &mut C) -> RedisResult<bool> {
         let removed: u64 = redis::cmd("DEL").arg(&self.key).query_async(conn).await?;

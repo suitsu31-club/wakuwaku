@@ -175,7 +175,7 @@ impl DataSource for MeiliSource {
     type Connection = Arc<Client>;
     type Error = Error;
 
-    async fn run<Q: Execute<Self>>(&self, query: Q) -> Result<Q::Output, Error> {
+    async fn run<Q: Execute<Self>>(&self, query: Q) -> Result<Q::Output, Q::Error> {
         let mut client = Arc::clone(&self.client);
         query.execute(&mut client).await
     }

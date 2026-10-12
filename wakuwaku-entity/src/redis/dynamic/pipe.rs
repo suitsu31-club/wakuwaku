@@ -59,8 +59,8 @@ use crate::query::{Execute, Query};
 use crate::redis::{Name, RedisSource, deserialize_error, millis, serialize_error, tagged_pair};
 use futures_util::Stream;
 use kanau::message::{MessageDe, MessageSer};
-use redis::RedisResult;
 use redis::aio::ConnectionLike;
+use redis::{RedisError, RedisResult};
 use std::fmt::{self, Debug, Formatter};
 use std::marker::PhantomData;
 use std::time::Duration;
@@ -212,6 +212,7 @@ where
     C: ConnectionLike + Clone + Send + Sync,
 {
     type Output = ();
+    type Error = RedisError;
 
     async fn execute(self, conn: &mut C) -> RedisResult<()> {
         let body = self.body.to_bytes().map_err(serialize_error)?;
@@ -236,6 +237,7 @@ where
     C: ConnectionLike + Clone + Send + Sync,
 {
     type Output = ();
+    type Error = RedisError;
 
     async fn execute(self, conn: &mut C) -> RedisResult<()> {
         push(&self.close, b"", self.ttl, conn).await
@@ -264,6 +266,7 @@ where
     D: ConnectionLike + Send,
 {
     type Output = PipeReceiver<B, D>;
+    type Error = RedisError;
 
     async fn execute(self, _: &mut C) -> RedisResult<PipeReceiver<B, D>> {
         Ok(PipeReceiver {

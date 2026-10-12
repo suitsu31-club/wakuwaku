@@ -47,6 +47,27 @@ pub struct TxMode {
 pub type FlowOutput<F> =
     <<F as TxFlow>::Query as Execute<SqlxSource<<F as TxFlow>::Database>>>::Output;
 
+/// How the queries of the flow `F` fail.
+pub type FlowError<F> =
+    <<F as TxFlow>::Query as Execute<SqlxSource<<F as TxFlow>::Database>>>::Error;
+
+/// The error of a query that runs in a transaction.
+///
+/// Whether a failed query aborted the transaction depends on the sqlx error
+/// behind it (see [`SqlxBackend::aborts_transaction`]). An error of the
+/// query's own, such as a lost optimistic-lock fence, never aborts it.
+pub trait AsSqlxError {
+    /// The sqlx error this is or wraps, or `None` for an error of the
+    /// query's own.
+    fn as_sqlx_error(&self) -> Option<&::sqlx::Error>;
+}
+
+impl AsSqlxError for ::sqlx::Error {
+    fn as_sqlx_error(&self) -> Option<&::sqlx::Error> {
+        Some(self)
+    }
+}
+
 /// Everything the flow `F` may touch: the effect of its query type.
 pub type FlowEffect<F> = <<F as TxFlow>::Query as Query>::Effect;
 
@@ -65,7 +86,7 @@ pub trait TxFlow: Sized + Send {
     /// The database the flow runs on.
     type Database: SqlxBackend;
     /// The queries the flow issues.
-    type Query: Execute<SqlxSource<Self::Database>>;
+    type Query: Execute<SqlxSource<Self::Database>, Error: AsSqlxError>;
     /// Returned to the caller after a commit.
     type Commit: Send;
     /// Returned to the caller after a rollback.
@@ -82,13 +103,14 @@ pub trait TxFlow: Sized + Send {
     /// Next step, given the result of the last query.
     ///
     /// `output` is an error only if the transaction is still usable after
-    /// it (see [`SqlxBackend::aborts_transaction`]). The flow may go on,
-    /// commit, or roll back.
-    fn resume(self, output: Result<FlowOutput<Self>, ::sqlx::Error>) -> Step<Self>;
+    /// it: an error of the query's own, or a sqlx error that doesn't abort
+    /// the transaction (see [`SqlxBackend::aborts_transaction`]). The flow
+    /// may go on, commit, or roll back.
+    fn resume(self, output: Result<FlowOutput<Self>, FlowError<Self>>) -> Step<Self>;
 
     /// The last query failed and ended the transaction on the server, so it
     /// will be rolled back. Describe the outcome.
-    fn aborted(self, error: ::sqlx::Error) -> (Self::Abort, Self::Report);
+    fn aborted(self, error: FlowError<Self>) -> (Self::Abort, Self::Report);
 }
 
 /// What a flow does next.
@@ -225,9 +247,13 @@ impl<F: TxFlow> Running<F> {
     ///
     /// If the error aborted the transaction, the flow is asked for its
     /// outcome and the transaction rolls back; otherwise the flow resumes.
-    pub fn ran(self, result: Result<FlowOutput<F>, ::sqlx::Error>) -> TxMachine<F> {
+    pub fn ran(self, result: Result<FlowOutput<F>, FlowError<F>>) -> TxMachine<F> {
         match result {
-            Err(error) if F::Database::aborts_transaction(&error) => {
+            Err(error)
+                if error
+                    .as_sqlx_error()
+                    .is_some_and(F::Database::aborts_transaction) =>
+            {
                 let (output, report) = self.flow.aborted(error);
                 TxMachine::Rollback(RollingBack { output, report })
             }
@@ -308,9 +334,28 @@ mod tests {
         type Effect = X;
     }
 
+    /// The error of [`Canned`]: its own refusal, or a sqlx error.
+    #[derive(Debug, thiserror::Error)]
+    enum CannedError {
+        #[error("conflict")]
+        Conflict,
+        #[error(transparent)]
+        Sqlx(#[from] ::sqlx::Error),
+    }
+
+    impl AsSqlxError for CannedError {
+        fn as_sqlx_error(&self) -> Option<&::sqlx::Error> {
+            match self {
+                CannedError::Conflict => None,
+                CannedError::Sqlx(error) => Some(error),
+            }
+        }
+    }
+
     impl<X: Effect> Execute<SqlxSource<Postgres>> for Canned<X> {
         type Output = i64;
-        async fn execute(self, _: &mut PgConnection) -> Result<i64, ::sqlx::Error> {
+        type Error = CannedError;
+        async fn execute(self, _: &mut PgConnection) -> Result<i64, CannedError> {
             Ok(self.0)
         }
     }
@@ -344,7 +389,7 @@ mod tests {
             }
         }
 
-        fn resume(self, output: Result<i64, ::sqlx::Error>) -> Step<Self> {
+        fn resume(self, output: Result<i64, CannedError>) -> Step<Self> {
             let Check::Reading(mut seen) = self else {
                 return Step::Rollback {
                     output: "bad state".into(),
@@ -368,15 +413,19 @@ mod tests {
                 }
                 Err(error) => {
                     seen.push(format!("err {error}"));
+                    let output = match error {
+                        CannedError::Conflict => "conflict",
+                        CannedError::Sqlx(_) => "client error",
+                    };
                     Step::Rollback {
-                        output: "client error".into(),
+                        output: output.into(),
                         report: seen,
                     }
                 }
             }
         }
 
-        fn aborted(self, error: ::sqlx::Error) -> (String, Vec<String>) {
+        fn aborted(self, error: CannedError) -> (String, Vec<String>) {
             (format!("aborted: {error}"), vec!["aborted".into()])
         }
     }
@@ -477,7 +526,7 @@ mod tests {
     #[test]
     fn client_side_error_resumes_the_flow() {
         let TxMachine::Rollback(rolling_back) =
-            running(WriteCheck::init()).ran(Err(::sqlx::Error::RowNotFound))
+            running(WriteCheck::init()).ran(Err(::sqlx::Error::RowNotFound.into()))
         else {
             unreachable!("the flow rolls back on errors it sees")
         };
@@ -486,9 +535,25 @@ mod tests {
     }
 
     #[test]
+    fn own_error_resumes_the_flow() {
+        let TxMachine::Rollback(rolling_back) =
+            running(WriteCheck::init()).ran(Err(CannedError::Conflict))
+        else {
+            unreachable!("the flow rolls back on errors it sees")
+        };
+        let done = rolling_back.rolled_back();
+        assert!(matches!(&done.output, Ok(TxOutput::RolledBack(why)) if why == "conflict"));
+        assert_eq!(
+            done.report,
+            Some(TxFinalState::RolledBack(vec!["err conflict".into()]))
+        );
+    }
+
+    #[test]
     fn aborting_error_skips_resume_and_rolls_back() {
         for error in [::sqlx::Error::Database(Box::new(ServerError)), io_error()] {
-            let TxMachine::Rollback(rolling_back) = running(WriteCheck::init()).ran(Err(error))
+            let TxMachine::Rollback(rolling_back) =
+                running(WriteCheck::init()).ran(Err(error.into()))
             else {
                 unreachable!("an aborted transaction must roll back")
             };

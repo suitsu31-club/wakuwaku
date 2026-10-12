@@ -80,7 +80,7 @@ impl<DB: SqlxBackend> DataSource for SqlxSource<DB> {
     type Connection = DB::Connection;
     type Error = ::sqlx::Error;
 
-    async fn run<Q: Execute<Self>>(&self, query: Q) -> Result<Q::Output, ::sqlx::Error> {
+    async fn run<Q: Execute<Self>>(&self, query: Q) -> Result<Q::Output, Q::Error> {
         let mut conn = self.pool.acquire().await?;
         query.execute(&mut *conn).await
     }

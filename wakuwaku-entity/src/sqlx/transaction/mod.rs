@@ -27,6 +27,7 @@
 //! impl Execute<SqlxSource<Postgres>> for TransferQuery {
 //!     /// Rows affected.
 //!     type Output = u64;
+//!     type Error = sqlx::Error;
 //!     async fn execute(self, conn: &mut PgConnection) -> Result<u64, sqlx::Error> {
 //!         let done = match self {
 //!             TransferQuery::Debit { from, amount } => {
@@ -104,7 +105,8 @@ pub mod flow;
 pub mod hook;
 
 pub use flow::{
-    FlowEffect, FlowOutput, IsolationLevel, Step, TxError, TxFinalState, TxFlow, TxMode, TxOutput,
+    AsSqlxError, FlowEffect, FlowError, FlowOutput, IsolationLevel, Step, TxError, TxFinalState,
+    TxFlow, TxMode, TxOutput,
 };
 
 use crate::effect::io::Covers;

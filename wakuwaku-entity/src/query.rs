@@ -4,8 +4,9 @@
 //!
 //! - [`Query`] says what it touches. It doesn't depend on where it runs, so
 //!   hooks and capability checks work the same for every data source.
-//! - [`Execute<S>`] says how it runs on the data source `S`. A query written
-//!   in portable SQL may implement it for several sources.
+//! - [`Execute<S>`] says how it runs on the data source `S`, and how it can
+//!   fail. A query written in portable SQL may implement it for several
+//!   sources.
 //!
 //! A [`Db<S, C>`] owns a data source `S` and a capability `C`. It implements
 //! [`Processor<Q>`] for every query `Q` that runs on `S` and whose effect `C`
@@ -20,7 +21,7 @@
 //! # impl DataSource for Memory {
 //! #     type Connection = ();
 //! #     type Error = std::convert::Infallible;
-//! #     async fn run<Q: Execute<Self>>(&self, query: Q) -> Result<Q::Output, Self::Error> {
+//! #     async fn run<Q: Execute<Self>>(&self, query: Q) -> Result<Q::Output, Q::Error> {
 //! #         query.execute(&mut ()).await
 //! #     }
 //! # }
@@ -31,6 +32,7 @@
 //! }
 //! # impl Execute<Memory> for DeletePost {
 //! #     type Output = ();
+//! #     type Error = std::convert::Infallible;
 //! #     async fn execute(self, _: &mut ()) -> Result<(), std::convert::Infallible> { Ok(()) }
 //! # }
 //!
@@ -43,6 +45,56 @@
 //! Handlers should stay generic over the handle, listing the queries they
 //! need (`D: Processor<FindUser> + Processor<DeletePost>`). The capability is
 //! then checked once, where the handle is wired in.
+//!
+//! A query that can refuse for reasons of its own (a lost optimistic-lock
+//! fence, a violated business rule, …) declares its own
+//! [`Error`](Execute::Error), which wraps the source's error:
+//!
+//! ```
+//! # use wakuwaku_entity::{DataSource, Entity, Execute, Query, Write};
+//! # struct Post;
+//! # impl Entity for Post {}
+//! # struct Memory;
+//! # #[derive(Debug)]
+//! # struct MemoryError;
+//! # impl DataSource for Memory {
+//! #     type Connection = u64;
+//! #     type Error = MemoryError;
+//! #     async fn run<Q: Execute<Self>>(&self, query: Q) -> Result<Q::Output, Q::Error> {
+//! #         query.execute(&mut 1).await
+//! #     }
+//! # }
+//! #[derive(Debug)]
+//! enum BumpError {
+//!     /// Someone else bumped the post first.
+//!     Conflict,
+//!     Source(MemoryError),
+//! }
+//!
+//! impl From<MemoryError> for BumpError {
+//!     fn from(error: MemoryError) -> Self {
+//!         Self::Source(error)
+//!     }
+//! }
+//!
+//! struct BumpPost { generation: u64 }
+//!
+//! impl Query for BumpPost {
+//!     type Effect = Write<Post>;
+//! }
+//!
+//! impl Execute<Memory> for BumpPost {
+//!     type Output = u64;
+//!     type Error = BumpError;
+//!     async fn execute(self, current: &mut u64) -> Result<u64, BumpError> {
+//!         if *current != self.generation {
+//!             return Err(BumpError::Conflict);
+//!         }
+//!         *current += 1;
+//!         Ok(*current)
+//!     }
+//! }
+//! ```
 
 use crate::effect::io::{Covers, Effect};
 use kanau::processor::Processor;
@@ -59,20 +111,27 @@ pub trait Query: Send + Sized {
 pub trait DataSource: Send + Sync + Sized {
     /// The connection a query runs on.
     type Connection: Send;
-    /// Error of the data source and of the queries that run on it.
+    /// Error of the data source itself. Queries that run on it fail with
+    /// this error or [one of their own](Execute::Error) that wraps it.
     type Error: Send;
 
     /// Get a connection and run `query` on it.
+    ///
+    /// Failing to get the connection is an error of the query, through
+    /// `From<Self::Error>`.
     fn run<Q: Execute<Self>>(
         &self,
         query: Q,
-    ) -> impl Future<Output = Result<Q::Output, Self::Error>> + Send;
+    ) -> impl Future<Output = Result<Q::Output, Q::Error>> + Send;
 }
 
 /// How a query runs on the data source `S`.
 pub trait Execute<S: DataSource>: Query {
     /// What the query returns.
     type Output: Send;
+    /// How the query fails: `S::Error`, or an error of the query's own that
+    /// wraps it.
+    type Error: From<S::Error> + Send;
 
     /// Run the query on `conn`.
     ///
@@ -81,7 +140,7 @@ pub trait Execute<S: DataSource>: Query {
     fn execute(
         self,
         conn: &mut S::Connection,
-    ) -> impl Future<Output = Result<Self::Output, S::Error>> + Send;
+    ) -> impl Future<Output = Result<Self::Output, Self::Error>> + Send;
 }
 
 /// A data source `S` usable with the capability `C`.
@@ -134,9 +193,93 @@ where
     C: Covers<Q::Effect>,
 {
     type Output = Q::Output;
-    type Error = S::Error;
+    type Error = Q::Error;
 
-    fn process(&self, query: Q) -> impl Future<Output = Result<Q::Output, S::Error>> + Send {
+    fn process(&self, query: Q) -> impl Future<Output = Result<Q::Output, Q::Error>> + Send {
         self.source.run(query)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::effect::io::Write;
+    use crate::effect::markers::{Entity, ReadWrite};
+
+    struct Post;
+    impl Entity for Post {}
+
+    /// Holds one post generation; `down` fails every connection.
+    struct Memory {
+        generation: u64,
+        down: bool,
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct Down;
+
+    impl DataSource for Memory {
+        type Connection = u64;
+        type Error = Down;
+
+        async fn run<Q: Execute<Self>>(&self, query: Q) -> Result<Q::Output, Q::Error> {
+            if self.down {
+                return Err(Down.into());
+            }
+            query.execute(&mut self.generation.clone()).await
+        }
+    }
+
+    #[derive(Debug, PartialEq)]
+    enum BumpError {
+        Conflict,
+        Source(Down),
+    }
+
+    impl From<Down> for BumpError {
+        fn from(error: Down) -> Self {
+            Self::Source(error)
+        }
+    }
+
+    struct BumpPost {
+        generation: u64,
+    }
+
+    impl Query for BumpPost {
+        type Effect = Write<Post>;
+    }
+
+    impl Execute<Memory> for BumpPost {
+        type Output = u64;
+        type Error = BumpError;
+        async fn execute(self, current: &mut u64) -> Result<u64, BumpError> {
+            if *current != self.generation {
+                return Err(BumpError::Conflict);
+            }
+            Ok(current.wrapping_add(1))
+        }
+    }
+
+    #[tokio::test]
+    async fn process_returns_the_query_error() {
+        let up: Db<Memory, ReadWrite> = Db::new(Memory {
+            generation: 3,
+            down: false,
+        });
+        assert_eq!(up.process(BumpPost { generation: 3 }).await, Ok(4));
+        assert_eq!(
+            up.process(BumpPost { generation: 2 }).await,
+            Err(BumpError::Conflict)
+        );
+
+        let down: Db<Memory, ReadWrite> = Db::new(Memory {
+            generation: 3,
+            down: true,
+        });
+        assert_eq!(
+            down.process(BumpPost { generation: 3 }).await,
+            Err(BumpError::Source(Down))
+        );
     }
 }

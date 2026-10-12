@@ -25,6 +25,7 @@
 //!
 //! impl<C: ConnectionLike + Clone + Send + Sync> Execute<RedisSource<C>> for StoreSession {
 //!     type Output = ();
+//!     type Error = redis::RedisError;
 //!     async fn execute(self, conn: &mut C) -> redis::RedisResult<()> {
 //!         conn.set_ex(format!("session:{}", self.token), self.user, 3600).await
 //!     }
@@ -85,7 +86,7 @@ where
     type Connection = C;
     type Error = RedisError;
 
-    async fn run<Q: Execute<Self>>(&self, query: Q) -> Result<Q::Output, RedisError> {
+    async fn run<Q: Execute<Self>>(&self, query: Q) -> Result<Q::Output, Q::Error> {
         let mut connection = self.connection.clone();
         query.execute(&mut connection).await
     }

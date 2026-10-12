@@ -178,6 +178,7 @@ impl<I: SearchIndex> Query for Search<I> {
 
 impl<I: SearchIndex> Execute<MeiliSource> for Search<I> {
     type Output = SearchResults<I::Document>;
+    type Error = Error;
 
     async fn execute(self, client: &mut Arc<Client>) -> Result<Self::Output, Error> {
         let request = self.request;

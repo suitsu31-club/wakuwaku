@@ -78,7 +78,7 @@ where
     EH: Sync,
 {
     type Output = Q::Output;
-    type Error = ::sqlx::Error;
+    type Error = Q::Error;
 
     fn process(
         &self,

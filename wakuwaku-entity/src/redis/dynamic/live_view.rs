@@ -90,7 +90,7 @@ use crate::redis::{Name, RedisSource, corrupted, deserialize_error, serialize_er
 use futures_util::Stream;
 use kanau::message::{MessageDe, MessageSer};
 use redis::aio::ConnectionLike;
-use redis::{RedisResult, Script};
+use redis::{RedisError, RedisResult, Script};
 use std::fmt::{self, Debug, Formatter};
 use std::marker::PhantomData;
 use std::sync::LazyLock;
@@ -448,6 +448,7 @@ where
     C: ConnectionLike + Clone + Send + Sync,
 {
     type Output = bool;
+    type Error = RedisError;
 
     async fn execute(self, conn: &mut C) -> RedisResult<bool> {
         let body = self.body.to_bytes().map_err(serialize_error)?;
@@ -498,6 +499,7 @@ where
     C: ConnectionLike + Clone + Send + Sync,
 {
     type Output = Option<Versioned<B>>;
+    type Error = RedisError;
 
     async fn execute(self, conn: &mut C) -> RedisResult<Option<Versioned<B>>> {
         read_head(&self.head, conn).await
@@ -520,6 +522,7 @@ where
     C: ConnectionLike + Clone + Send + Sync,
 {
     type Output = Option<u64>;
+    type Error = RedisError;
 
     async fn execute(self, conn: &mut C) -> RedisResult<Option<u64>> {
         redis::cmd("HGET")
@@ -548,6 +551,7 @@ where
     C: ConnectionLike + Clone + Send + Sync,
 {
     type Output = Option<History<B>>;
+    type Error = RedisError;
 
     async fn execute(self, conn: &mut C) -> RedisResult<Option<History<B>>> {
         let reply = redis::cmd("XRANGE")
@@ -613,6 +617,7 @@ where
     C: ConnectionLike + Clone + Send + Sync,
 {
     type Output = Commit;
+    type Error = RedisError;
 
     async fn execute(self, conn: &mut C) -> RedisResult<Commit> {
         let diff = self.diff.to_bytes().map_err(serialize_error)?;
@@ -655,6 +660,7 @@ where
     D: ConnectionLike + Send,
 {
     type Output = Option<(Versioned<B>, LiveViewSubscription<B, D>)>;
+    type Error = RedisError;
 
     async fn execute(self, conn: &mut C) -> RedisResult<Self::Output> {
         let Some(latest) = read_head::<B>(&self.head, conn).await? else {
@@ -685,6 +691,7 @@ where
     D: ConnectionLike + Send,
 {
     type Output = LiveViewSubscription<B, D>;
+    type Error = RedisError;
 
     async fn execute(self, _: &mut C) -> RedisResult<LiveViewSubscription<B, D>> {
         Ok(LiveViewSubscription::new(self.conn, self.log, self.version))
@@ -774,6 +781,7 @@ where
     C: ConnectionLike + Clone + Send + Sync,
 {
     type Output = bool;
+    type Error = RedisError;
 
     async fn execute(self, conn: &mut C) -> RedisResult<bool> {
         let removed: u64 = redis::cmd("UNLINK")

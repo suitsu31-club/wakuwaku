@@ -41,7 +41,7 @@ use crate::query::{Execute, Query};
 use crate::redis::RedisSource;
 use crate::redis::{Name, item_key, millis, tagged_pair};
 use redis::aio::ConnectionLike;
-use redis::{RedisResult, Script};
+use redis::{RedisError, RedisResult, Script};
 use std::fmt::{self, Debug, Formatter};
 use std::marker::PhantomData;
 use std::sync::LazyLock;
@@ -214,6 +214,7 @@ where
     C: ConnectionLike + Clone + Send + Sync,
 {
     type Output = Option<LockToken<Lock<N>>>;
+    type Error = RedisError;
 
     async fn execute(self, conn: &mut C) -> RedisResult<Self::Output> {
         let token = lock_token()?;
@@ -287,6 +288,7 @@ where
     C: ConnectionLike + Clone + Send + Sync,
 {
     type Output = bool;
+    type Error = RedisError;
 
     async fn execute(self, conn: &mut C) -> RedisResult<bool> {
         RELEASE
@@ -312,6 +314,7 @@ where
     C: ConnectionLike + Clone + Send + Sync,
 {
     type Output = bool;
+    type Error = RedisError;
 
     async fn execute(self, conn: &mut C) -> RedisResult<bool> {
         EXTEND
@@ -385,6 +388,7 @@ where
     C: ConnectionLike + Clone + Send + Sync,
 {
     type Output = Option<ReadToken<N>>;
+    type Error = RedisError;
 
     async fn execute(self, conn: &mut C) -> RedisResult<Self::Output> {
         let token = lock_token()?;
@@ -422,6 +426,7 @@ where
     C: ConnectionLike + Clone + Send + Sync,
 {
     type Output = Option<LockToken<RwLock<N>>>;
+    type Error = RedisError;
 
     async fn execute(self, conn: &mut C) -> RedisResult<Self::Output> {
         let token = lock_token()?;
@@ -482,6 +487,7 @@ where
     C: ConnectionLike + Clone + Send + Sync,
 {
     type Output = bool;
+    type Error = RedisError;
 
     async fn execute(self, conn: &mut C) -> RedisResult<bool> {
         READ_RELEASE
@@ -507,6 +513,7 @@ where
     C: ConnectionLike + Clone + Send + Sync,
 {
     type Output = bool;
+    type Error = RedisError;
 
     async fn execute(self, conn: &mut C) -> RedisResult<bool> {
         READ_EXTEND
