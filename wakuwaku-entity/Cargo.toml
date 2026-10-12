@@ -1,7 +1,7 @@
 [package]
 name = "wakuwaku-entity"
 version = "0.2.0"
-description = "Capability-typed queries, hooks and pure transaction flows over sqlx, Redis and Meilisearch"
+description = "Capability-typed queries, hooks and transaction flows over sqlx, Redis and Meilisearch"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -11,6 +11,7 @@ homepage.workspace = true
 kanau.workspace = true
 thiserror = "2"
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio"], optional = true }
+either = { version = "1.15", optional = true }
 redis = { version = "1.0", default-features = false, features = ["tokio-comp", "script"], optional = true }
 blake3 = { version = "1.8", optional = true }
 getrandom = { version = "0.4", optional = true }
@@ -25,8 +26,8 @@ tokio.workspace = true
 
 [features]
 default = ["sqlx-pg"]
-sqlx-pg = ["dep:sqlx", "sqlx/postgres"]
-sqlx-mysql = ["dep:sqlx", "sqlx/mysql"]
+sqlx-pg = ["dep:sqlx", "dep:either", "sqlx/postgres"]
+sqlx-mysql = ["dep:sqlx", "dep:either", "sqlx/mysql"]
 redis = ["dep:redis", "dep:blake3", "dep:getrandom", "dep:futures-util"]
 meilisearch = ["dep:meilisearch-sdk", "dep:serde", "dep:serde_json", "dep:time"]
 
