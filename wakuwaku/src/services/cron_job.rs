@@ -1,9 +1,10 @@
-//! Jobs that run locally at a fixed interval.
+//! Jobs that run locally on an interval.
 //!
 //! A [`CronJob`] is a [`Processor`] of [`CronTick`]s with a fixed
-//! [`INTERVAL`](CronJob::INTERVAL). Cron jobs are usually scans (expire stale
-//! rows, retry stuck work, reconcile an index), so the interval is a
-//! constant of the job type rather than a calendar expression.
+//! [`INTERVAL`](CronJob::INTERVAL), a [`CronJobInterval`]. Cron jobs are
+//! usually scans (expire stale rows, retry stuck work, reconcile an index),
+//! so the interval is a constant of the job type rather than a calendar
+//! expression.
 //!
 //! [`CronRegisterCenter`] collects jobs in a type-level linked list, the same
 //! way [`ServiceBuilder`] does; there is no boxing and no dynamic dispatch.
@@ -12,25 +13,35 @@
 //!
 //! # Schedule
 //!
-//! Each job runs on its own grid `start + k * INTERVAL`, where `start` is
-//! when [`start`](CronRegisterCenter::start) was called:
+//! Every job's first run is when [`start`](CronRegisterCenter::start) was
+//! called. The variant of [`CronJob::INTERVAL`] decides when the next runs
+//! start, for a duration `d`:
 //!
-//! - The first run is at `start`.
-//! - Runs of one job never overlap. A run that takes longer than `INTERVAL`
-//!   skips the grid points it covered; the next run is at the first grid
-//!   point that is not before the run ended. Two consecutive runs therefore
-//!   start a whole, non-zero number of intervals apart.
+//! | `INTERVAL`        | Next run starts                                         | Runs overlap |
+//! |-------------------|---------------------------------------------------------|--------------|
+//! | `AfterFinish(d)`  | `d` after the previous run finished                     | no           |
+//! | `AtLeast(d)`      | `d` after the previous run started, or as soon as it finished if that is later | no |
+//! | `AfterStart(d)`   | on the grid `start + k * d`                             | yes          |
+//!
+//! - With `AfterFinish` and `AtLeast`, two consecutive runs start at least
+//!   `d` apart on the monotonic clock, so their [`fired_at`](CronTick::fired_at)
+//!   are at least `d` apart unless the wall clock is adjusted in between.
+//! - With `AfterStart`, runs start on the grid however long they take; a run
+//!   that takes longer than `d` runs concurrently with the next ones. Grid
+//!   points missed because the runtime was blocked are skipped rather than
+//!   run in a burst. `fired_at` includes the wake-up delay, so consecutive
+//!   `fired_at` can be slightly less than `d` apart.
 //! - A run that returns an error, or panics, is logged with [`tracing`] and
 //!   the job keeps its schedule.
 //!
-//! An `INTERVAL` of zero has no schedule. Registering such a job fails to
-//! compile; the check runs when the registration is instantiated, so
-//! `cargo build` reports it and `cargo check` alone does not:
+//! A zero duration has no schedule. Registering such a job fails to compile;
+//! the check runs when the registration is instantiated, so `cargo build`
+//! reports it and `cargo check` alone does not:
 //!
 //! ```compile_fail
 //! use std::time::Duration;
 //! use wakuwaku::deps::kanau::processor::Processor;
-//! use wakuwaku::services::cron_job::{CronJob, CronRegisterCenter, CronTick};
+//! use wakuwaku::services::cron_job::{CronJob, CronJobInterval, CronRegisterCenter, CronTick};
 //!
 //! struct Busy;
 //! impl Processor<CronTick> for Busy {
@@ -39,7 +50,7 @@
 //!     async fn process(&self, _: CronTick) -> Result<(), Self::Error> { Ok(()) }
 //! }
 //! impl CronJob for Busy {
-//!     const INTERVAL: Duration = Duration::ZERO;
+//!     const INTERVAL: CronJobInterval = CronJobInterval::AtLeast(Duration::ZERO);
 //! }
 //!
 //! let _ = CronRegisterCenter::new(Busy);
@@ -51,7 +62,11 @@
 //! service each run happens once per replica. Make the job idempotent, or
 //! partition the work, for example by having each replica scan only its
 //! share of the keys, or by taking a lock such as
-//! `wakuwaku_entity::redis::collection::lock::Lock` inside the run.
+//! `wakuwaku_entity::redis::collection::lock::Lock` inside the run. To run
+//! each pass once across replicas, a run can claim it in shared storage with
+//! a fence such as "the last claimed run fired at least `d` before this
+//! tick's `fired_at`"; use `AfterFinish` or `AtLeast` for such a job, since
+//! `AfterStart` runs can fire slightly less than `d` apart.
 //!
 //! # Example
 //!
@@ -62,7 +77,7 @@
 //! use wakuwaku::deps::kanau::processor::Processor;
 //! use wakuwaku::services::ServiceCreation;
 //! use wakuwaku::services::builder::ServiceBuilder;
-//! use wakuwaku::services::cron_job::{CronJob, CronTick};
+//! use wakuwaku::services::cron_job::{CronJob, CronJobInterval, CronTick};
 //!
 //! /// Shared dependency, cheap to clone.
 //! #[derive(Clone, Default)]
@@ -86,7 +101,7 @@
 //! }
 //!
 //! impl CronJob for ExpireSessions {
-//!     const INTERVAL: Duration = Duration::from_secs(60);
+//!     const INTERVAL: CronJobInterval = CronJobInterval::AtLeast(Duration::from_secs(60));
 //! }
 //!
 //! # #[tokio::main(flavor = "current_thread")]
@@ -121,6 +136,7 @@ use kanau::processor::Processor;
 use std::any::{Any, type_name};
 use std::fmt::Display;
 use std::panic::AssertUnwindSafe;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tokio::sync::watch;
 use tokio::task::JoinSet;
@@ -137,7 +153,41 @@ pub struct CronTick {
     pub fired_at: SystemTime,
 }
 
-/// A job that runs locally every [`INTERVAL`](Self::INTERVAL).
+/// How the runs of a [`CronJob`] are spaced. See the
+/// [module documentation](self#schedule) for the schedule.
+///
+/// The duration must not be zero; registering a job with a zero duration
+/// fails to build.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CronJobInterval {
+    /// Time from the end of a run to the start of the next one. Runs never
+    /// overlap.
+    AfterFinish(Duration),
+
+    /// Minimum time from the start of a run to the start of the next one.
+    /// Runs never overlap: a run that takes longer is followed by the next
+    /// one as soon as it finishes, so consecutive starts are
+    /// `max(duration, run time)` apart.
+    AtLeast(Duration),
+
+    /// Time between the starts of consecutive runs, on a fixed grid. A run
+    /// that takes longer runs concurrently with the next ones.
+    AfterStart(Duration),
+}
+
+impl CronJobInterval {
+    /// The duration of any variant.
+    const fn duration(self) -> Duration {
+        match self {
+            Self::AfterFinish(duration) | Self::AtLeast(duration) | Self::AfterStart(duration) => {
+                duration
+            }
+        }
+    }
+}
+
+/// A job that runs locally on the schedule set by
+/// [`INTERVAL`](Self::INTERVAL).
 ///
 /// The job itself is a [`Processor`] of [`CronTick`]s that outputs `()`.
 /// Returned errors are logged with [`tracing`] and don't stop the job. See
@@ -145,15 +195,15 @@ pub struct CronTick {
 pub trait CronJob:
     Processor<CronTick, Output = (), Error: Display> + Send + Sync + 'static
 {
-    /// Time between two scheduled runs. Must not be zero; registering a job
-    /// with a zero interval fails to build.
-    const INTERVAL: Duration;
+    /// How runs are spaced. Its duration must not be zero; registering a job
+    /// with a zero duration fails to build.
+    const INTERVAL: CronJobInterval;
 }
 
 /// Rejects a zero [`CronJob::INTERVAL`] at compile time.
 const fn assert_interval<Job: CronJob>() {
     assert!(
-        !Job::INTERVAL.is_zero(),
+        !Job::INTERVAL.duration().is_zero(),
         "CronJob::INTERVAL must not be zero"
     );
 }
@@ -345,7 +395,26 @@ impl CronRuntime {
 
 /// Runs `job` on its schedule until `stop` holds `true` or its sender is
 /// dropped.
-async fn run_job<Job: CronJob>(job: Job, mut stop: watch::Receiver<bool>) {
+async fn run_job<Job: CronJob>(job: Job, stop: watch::Receiver<bool>) {
+    match Job::INTERVAL {
+        CronJobInterval::AfterFinish(pause) => {
+            run_serially(job, stop, |_started, finished| later(finished, pause)).await;
+        }
+        CronJobInterval::AtLeast(period) => {
+            run_serially(job, stop, |started, _finished| later(started, period)).await;
+        }
+        CronJobInterval::AfterStart(period) => run_overlapping(job, stop, period).await,
+    }
+}
+
+/// Runs `job` one run at a time. `next_start` gets when the previous run
+/// started and finished, and returns when the next one starts; a time in the
+/// past starts it at once.
+async fn run_serially<Job: CronJob>(
+    job: Job,
+    mut stop: watch::Receiver<bool>,
+    next_start: impl Fn(Instant, Instant) -> Instant,
+) {
     let mut scheduled = Instant::now();
     let mut run = 0u64;
     loop {
@@ -354,14 +423,54 @@ async fn run_job<Job: CronJob>(job: Job, mut stop: watch::Receiver<bool>) {
             _ = stop.wait_for(|&stop| stop) => return,
             () = tokio::time::sleep_until(scheduled) => {}
         }
+        let started = Instant::now();
         let tick = CronTick {
             run,
             fired_at: SystemTime::now(),
         };
         run = run.wrapping_add(1);
         execute(&job, tick).await;
-        scheduled = next_tick(scheduled, Instant::now(), Job::INTERVAL);
+        scheduled = next_start(started, Instant::now());
     }
+}
+
+/// Starts a run of `job` every `period` on a grid, each in its own task, so
+/// that runs can overlap. Once stopped, waits for the runs in progress.
+async fn run_overlapping<Job: CronJob>(
+    job: Job,
+    mut stop: watch::Receiver<bool>,
+    period: Duration,
+) {
+    let job = Arc::new(job);
+    let mut runs = JoinSet::new();
+    let mut scheduled = Instant::now();
+    let mut run = 0u64;
+    loop {
+        tokio::select! {
+            biased;
+            _ = stop.wait_for(|&stop| stop) => break,
+            // Reap finished runs so the set doesn't grow; `execute` already
+            // logged their outcome.
+            Some(_) = runs.join_next(), if !runs.is_empty() => {}
+            () = tokio::time::sleep_until(scheduled) => {
+                let tick = CronTick {
+                    run,
+                    fired_at: SystemTime::now(),
+                };
+                run = run.wrapping_add(1);
+                let job = Arc::clone(&job);
+                runs.spawn(async move { execute(&*job, tick).await });
+                scheduled = next_tick(scheduled, Instant::now(), period);
+            }
+        }
+    }
+    while runs.join_next().await.is_some() {}
+}
+
+/// `instant + duration`, or `instant` in the unreachable case that it
+/// overflows.
+fn later(instant: Instant, duration: Duration) -> Instant {
+    instant.checked_add(duration).unwrap_or(instant)
 }
 
 /// Run `job` once, logging an error or a panic.
@@ -408,8 +517,8 @@ fn next_tick(previous: Instant, now: Instant, period: Duration) -> Instant {
 #[allow(clippy::arithmetic_side_effects)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::marker::PhantomData;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use tokio::sync::Mutex;
 
     const PERIOD: Duration = Duration::from_secs(10);
@@ -438,13 +547,45 @@ mod tests {
         assert_eq!(next_tick(start, now, PERIOD), start + PERIOD * 3);
     }
 
-    /// Records when each run starts; the first run takes `first_run` long.
-    struct Recorder {
-        starts: Arc<Mutex<Vec<Instant>>>,
-        first_run: Duration,
+    /// Picks the [`CronJob::INTERVAL`] of a test job.
+    trait Schedule: Send + Sync + 'static {
+        const INTERVAL: CronJobInterval;
     }
 
-    impl Processor<CronTick> for Recorder {
+    struct AfterFinish;
+    impl Schedule for AfterFinish {
+        const INTERVAL: CronJobInterval = CronJobInterval::AfterFinish(PERIOD);
+    }
+
+    struct AtLeast;
+    impl Schedule for AtLeast {
+        const INTERVAL: CronJobInterval = CronJobInterval::AtLeast(PERIOD);
+    }
+
+    struct AfterStart;
+    impl Schedule for AfterStart {
+        const INTERVAL: CronJobInterval = CronJobInterval::AfterStart(PERIOD);
+    }
+
+    /// Records when each run starts; the first run takes `first_run` long,
+    /// the others return at once.
+    struct Recorder<S> {
+        starts: Arc<Mutex<Vec<Instant>>>,
+        first_run: Duration,
+        schedule: PhantomData<S>,
+    }
+
+    impl<S> Recorder<S> {
+        fn new(starts: Arc<Mutex<Vec<Instant>>>, first_run: Duration) -> Self {
+            Self {
+                starts,
+                first_run,
+                schedule: PhantomData,
+            }
+        }
+    }
+
+    impl<S: Schedule> Processor<CronTick> for Recorder<S> {
         type Output = ();
         type Error = std::convert::Infallible;
         async fn process(&self, tick: CronTick) -> Result<(), Self::Error> {
@@ -456,26 +597,61 @@ mod tests {
         }
     }
 
-    impl CronJob for Recorder {
-        const INTERVAL: Duration = PERIOD;
+    impl<S: Schedule> CronJob for Recorder<S> {
+        const INTERVAL: CronJobInterval = S::INTERVAL;
+    }
+
+    /// Offsets from the start of the run starts of a job whose first run
+    /// takes two and a half periods, observed for five and a quarter periods.
+    async fn starts_after_a_long_first_run<S: Schedule>() -> Vec<Duration> {
+        let starts = Arc::new(Mutex::new(Vec::new()));
+        let origin = Instant::now();
+        let cron =
+            CronRegisterCenter::new(Recorder::<S>::new(starts.clone(), PERIOD * 2 + PERIOD / 2))
+                .start();
+        tokio::time::sleep(PERIOD * 5 + PERIOD / 4).await;
+        cron.shutdown().await;
+        let starts = starts.lock().await;
+        starts.iter().map(|s| *s - origin).collect()
     }
 
     #[tokio::test(start_paused = true)]
-    async fn runs_on_the_grid_and_skips_ticks_covered_by_a_long_run() {
-        let starts = Arc::new(Mutex::new(Vec::new()));
-        let origin = Instant::now();
-        let cron = CronRegisterCenter::new(Recorder {
-            starts: starts.clone(),
-            first_run: PERIOD * 2 + PERIOD / 2,
-        })
-        .start();
-        tokio::time::sleep(PERIOD * 5 + PERIOD / 2).await;
-        cron.shutdown().await;
-
-        let offsets: Vec<Duration> = starts.lock().await.iter().map(|s| *s - origin).collect();
+    async fn after_finish_waits_the_interval_after_each_run_ends() {
         assert_eq!(
-            offsets,
-            [Duration::ZERO, PERIOD * 3, PERIOD * 4, PERIOD * 5]
+            starts_after_a_long_first_run::<AfterFinish>().await,
+            [
+                Duration::ZERO,
+                PERIOD * 3 + PERIOD / 2,
+                PERIOD * 4 + PERIOD / 2
+            ]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn at_least_starts_after_the_interval_or_when_the_long_run_ends() {
+        assert_eq!(
+            starts_after_a_long_first_run::<AtLeast>().await,
+            [
+                Duration::ZERO,
+                PERIOD * 2 + PERIOD / 2,
+                PERIOD * 3 + PERIOD / 2,
+                PERIOD * 4 + PERIOD / 2
+            ]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn after_start_keeps_the_grid_and_overlaps_a_long_run() {
+        assert_eq!(
+            starts_after_a_long_first_run::<AfterStart>().await,
+            [
+                Duration::ZERO,
+                PERIOD,
+                PERIOD * 2,
+                PERIOD * 3,
+                PERIOD * 4,
+                PERIOD * 5
+            ]
         );
     }
 
@@ -500,7 +676,7 @@ mod tests {
     }
 
     impl CronJob for Flaky {
-        const INTERVAL: Duration = PERIOD;
+        const INTERVAL: CronJobInterval = CronJobInterval::AtLeast(PERIOD);
     }
 
     #[tokio::test(start_paused = true)]
@@ -515,57 +691,74 @@ mod tests {
         assert!(succeeded.load(Ordering::SeqCst));
     }
 
-    /// Takes half a period, then marks itself finished.
-    struct Slow {
-        runs: Arc<Mutex<u64>>,
-        finished: Arc<AtomicBool>,
+    /// Takes one and a half periods, counting the runs that started and
+    /// finished.
+    struct Slow<S> {
+        started: Arc<AtomicU64>,
+        finished: Arc<AtomicU64>,
+        schedule: PhantomData<S>,
     }
 
-    impl Processor<CronTick> for Slow {
+    impl<S: Schedule> Processor<CronTick> for Slow<S> {
         type Output = ();
         type Error = std::convert::Infallible;
         async fn process(&self, _: CronTick) -> Result<(), Self::Error> {
-            *self.runs.lock().await += 1;
-            tokio::time::sleep(PERIOD / 2).await;
-            self.finished.store(true, Ordering::SeqCst);
+            self.started.fetch_add(1, Ordering::SeqCst);
+            tokio::time::sleep(PERIOD + PERIOD / 2).await;
+            self.finished.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
     }
 
-    impl CronJob for Slow {
-        const INTERVAL: Duration = PERIOD;
+    impl<S: Schedule> CronJob for Slow<S> {
+        const INTERVAL: CronJobInterval = S::INTERVAL;
+    }
+
+    /// Shuts a [`Slow`] job down at `stop_at`, while no run has finished, and
+    /// returns how many runs started and finished, observed three periods
+    /// after the shutdown.
+    async fn shut_down_slow_job<S: Schedule>(stop_at: Duration) -> (u64, u64) {
+        let started = Arc::new(AtomicU64::new(0));
+        let finished = Arc::new(AtomicU64::new(0));
+        let cron = CronRegisterCenter::new(Slow::<S> {
+            started: started.clone(),
+            finished: finished.clone(),
+            schedule: PhantomData,
+        })
+        .start();
+        tokio::time::sleep(stop_at).await;
+        assert_eq!(finished.load(Ordering::SeqCst), 0);
+
+        cron.shutdown().await;
+        tokio::time::sleep(PERIOD * 3).await;
+        (
+            started.load(Ordering::SeqCst),
+            finished.load(Ordering::SeqCst),
+        )
     }
 
     #[tokio::test(start_paused = true)]
     async fn shutdown_lets_the_run_in_progress_finish_and_stops_the_schedule() {
-        let runs = Arc::new(Mutex::new(0));
-        let finished = Arc::new(AtomicBool::new(false));
-        let cron = CronRegisterCenter::new(Slow {
-            runs: runs.clone(),
-            finished: finished.clone(),
-        })
-        .start();
-        tokio::time::sleep(PERIOD / 4).await;
-        assert!(!finished.load(Ordering::SeqCst));
+        assert_eq!(shut_down_slow_job::<AtLeast>(PERIOD / 4).await, (1, 1));
+    }
 
-        cron.shutdown().await;
-        assert!(finished.load(Ordering::SeqCst));
-        tokio::time::sleep(PERIOD * 3).await;
-        assert_eq!(*runs.lock().await, 1);
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_lets_every_overlapping_run_finish() {
+        assert_eq!(
+            shut_down_slow_job::<AfterStart>(PERIOD + PERIOD / 4).await,
+            (2, 2)
+        );
     }
 
     #[tokio::test(start_paused = true)]
     async fn every_job_in_the_chain_runs() {
         let first = Arc::new(Mutex::new(Vec::new()));
         let second = Arc::new(AtomicBool::new(false));
-        let cron = CronRegisterCenter::new(Recorder {
-            starts: first.clone(),
-            first_run: Duration::ZERO,
-        })
-        .push(Flaky {
-            succeeded: second.clone(),
-        })
-        .start();
+        let cron = CronRegisterCenter::new(Recorder::<AtLeast>::new(first.clone(), Duration::ZERO))
+            .push(Flaky {
+                succeeded: second.clone(),
+            })
+            .start();
         tokio::time::sleep(PERIOD * 2 + PERIOD / 2).await;
         cron.shutdown().await;
         assert_eq!(first.lock().await.len(), 3);

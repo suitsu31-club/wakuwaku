@@ -205,7 +205,7 @@ impl<Head, Chain> ServiceBuilder<Head, Chain> {
     /// use std::time::Duration;
     /// use wakuwaku::deps::kanau::processor::Processor;
     /// use wakuwaku::services::builder::ServiceBuilder;
-    /// use wakuwaku::services::cron_job::{CronJob, CronTick};
+    /// use wakuwaku::services::cron_job::{CronJob, CronJobInterval, CronTick};
     ///
     /// #[derive(Clone)]
     /// struct Database;
@@ -219,7 +219,7 @@ impl<Head, Chain> ServiceBuilder<Head, Chain> {
     ///     async fn process(&self, _: CronTick) -> Result<(), Self::Error> { Ok(()) }
     /// }
     /// impl CronJob for RotateKeys {
-    ///     const INTERVAL: Duration = Duration::from_secs(3600);
+    ///     const INTERVAL: CronJobInterval = CronJobInterval::AfterFinish(Duration::from_secs(3600));
     /// }
     ///
     /// # #[tokio::main(flavor = "current_thread")]

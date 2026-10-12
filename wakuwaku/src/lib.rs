@@ -24,7 +24,8 @@
 //! - [`services::builder`]: [`ServiceBuilder`], the type-indexed registry of
 //!   shared dependencies, and [`ServiceCreation`], how a component is built
 //!   from one of them.
-//! - [`services::cron_job`]: [`CronJob`]s, run locally at a fixed interval.
+//! - [`services::cron_job`]: [`CronJob`]s, run locally on a
+//!   [`CronJobInterval`].
 //! - `services::grpc_service` (feature `grpc`): registering tonic servers
 //!   built from the service builder.
 //! - `services::iggy_consumer` (feature `iggy`): registering Iggy event
@@ -67,7 +68,7 @@ pub mod services;
 
 pub use services::ServiceCreation;
 pub use services::builder::ServiceBuilder;
-pub use services::cron_job::{CronJob, CronTick};
+pub use services::cron_job::{CronJob, CronJobInterval, CronTick};
 
 /// Capability-typed data access: the [`wakuwaku-entity`](wakuwaku_entity)
 /// crate.

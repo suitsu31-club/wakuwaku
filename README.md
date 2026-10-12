@@ -43,7 +43,7 @@ wakuwaku = { version = "1.0.0-rc1", features = ["iggy", "sqlx-pg", "redis"] }
 ```rust
 use std::time::Duration;
 use wakuwaku::deps::kanau::processor::Processor;
-use wakuwaku::{CronJob, CronTick, ServiceBuilder, ServiceCreation};
+use wakuwaku::{CronJob, CronJobInterval, CronTick, ServiceBuilder, ServiceCreation};
 
 #[derive(Clone)]
 struct SessionStore;
@@ -65,7 +65,7 @@ impl Processor<CronTick> for ExpireSessions {
 }
 
 impl CronJob for ExpireSessions {
-    const INTERVAL: Duration = Duration::from_secs(60);
+    const INTERVAL: CronJobInterval = CronJobInterval::AtLeast(Duration::from_secs(60));
 }
 
 #[tokio::main]
@@ -88,7 +88,7 @@ async fn main() {
 }
 ```
 
-Cron jobs run locally, each on a fixed grid of `INTERVAL`. Runs of one job never overlap, and a run that overruns skips the ticks it covered. Every replica runs its own jobs, so make jobs idempotent or partition their work.
+Cron jobs run locally. `INTERVAL` says how runs are spaced: `AfterFinish(d)` waits `d` after each run ends, `AtLeast(d)` starts runs at least `d` apart without overlapping (an overrunning run is followed at once), and `AfterStart(d)` starts runs on a fixed grid of `d` even if they overlap. Every replica runs its own jobs, so make jobs idempotent or partition their work.
 
 ## Migrating from 0.3
 
