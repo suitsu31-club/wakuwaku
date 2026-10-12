@@ -10,6 +10,11 @@ through [`prove`] either fails with a [`ValidateError`] or hands back a
 Downstream code that requires a validated value takes `Proven<T, P>` instead of
 `T`, so "forgot to validate" becomes a type error rather than a runtime bug.
 
+A check that needs neither context nor I/O can instead be a [`PureVerifier`]: a
+function pointer `fn(&T) -> Result<P, ValidateError<Infallible>>` that can be
+declared as a `static` or `const`. [`PureVerifier::prove`] runs it and hands
+back a [`Proven<T, P>`] the same way.
+
 Predicates compose with [`And`] and [`Or`]. Both evaluate their operands in the
 [`CheckOrder`] passed to [`prove`], and forward that order to nested predicates.
 

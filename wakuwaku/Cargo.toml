@@ -16,7 +16,7 @@ tokio.workspace = true
 tracing = "0.1"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 tonic = { version = "0.14", optional = true }
-wakuwaku-proof = { version = "0.1", path = "../wakuwaku-proof", optional = true }
+wakuwaku-proof = { version = "0.2", path = "../wakuwaku-proof", optional = true }
 wakuwaku-iggy = { version = "0.1", path = "../wakuwaku-iggy", optional = true }
 iggy = { version = "0.11", optional = true }
 wakuwaku-entity = { version = "0.1", path = "../wakuwaku-entity", default-features = false, optional = true }
