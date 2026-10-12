@@ -1,6 +1,6 @@
 [package]
 name = "wakuwaku-entity"
-version = "0.1.0"
+version = "0.2.0"
 description = "Capability-typed queries, hooks and pure transaction flows over sqlx, Redis and Meilisearch"
 edition.workspace = true
 license.workspace = true
