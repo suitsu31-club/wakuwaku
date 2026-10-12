@@ -91,6 +91,82 @@ impl<Head, Chain> ServiceBuilder<Head, Chain> {
         <Self as ProvideAt<T, I>>::provide_at(self)
     }
 
+    /// Create a service from a registered dependency and register it.
+    ///
+    /// `Service`'s [`Dep`](ServiceCreation::Dep) is looked up at `Position`
+    /// and cloned. The service is then created with
+    /// [`create_service`](ServiceCreation::create_service) and pushed, so it
+    /// is found at [`Here`] and can itself be the dependency of the
+    /// components registered after it.
+    ///
+    /// `Position` can usually be passed as `_`; it is inferred when the
+    /// dependency's type is registered exactly once.
+    ///
+    /// ```
+    /// use wakuwaku::services::ServiceCreation;
+    /// use wakuwaku::services::builder::ServiceBuilder;
+    ///
+    /// #[derive(Clone)]
+    /// struct CommonDep { db_url: &'static str }
+    ///
+    /// struct UserRepo { db_url: &'static str }
+    ///
+    /// impl ServiceCreation for UserRepo {
+    ///     type Dep = CommonDep;
+    ///     fn create_service(dep: CommonDep) -> Self { Self { db_url: dep.db_url } }
+    /// }
+    ///
+    /// let services = ServiceBuilder::new(CommonDep { db_url: "postgres://db" })
+    ///     .construct_subservice::<UserRepo, _>();
+    /// assert_eq!(services.provide::<UserRepo, _>().db_url, "postgres://db");
+    /// ```
+    pub fn construct_subservice<Service, Position>(self) -> ServiceBuilder<Service, Self>
+    where
+        Service: ServiceCreation,
+        Position: ServiceBuilderPosition,
+        Self: ProvideAt<Service::Dep, Position>,
+    {
+        let new_service_dep = self.provide::<Service::Dep, Position>().clone();
+        let new_service = Service::create_service(new_service_dep);
+        self.push(new_service)
+    }
+
+    /// Build a service from any registered services and register it.
+    ///
+    /// `composer` borrows the whole builder, so it can
+    /// [`provide`](Self::provide) as many registered services as it needs.
+    /// Use this when a service needs a combination of dependencies that no
+    /// single registered value holds. The result is pushed, so it is found at
+    /// [`Here`] and can itself be the dependency of the components registered
+    /// after it.
+    ///
+    /// ```
+    /// use wakuwaku::services::builder::ServiceBuilder;
+    ///
+    /// #[derive(Clone)]
+    /// struct IggyClient(&'static str);
+    /// #[derive(Clone)]
+    /// struct SmtpClient(&'static str);
+    ///
+    /// struct MailSender { iggy: IggyClient, smtp: SmtpClient }
+    ///
+    /// let services = ServiceBuilder::new(IggyClient("iggy"))
+    ///     .push(SmtpClient("smtp"))
+    ///     .compose_subservice(|s| MailSender {
+    ///         iggy: s.provide::<IggyClient, _>().clone(),
+    ///         smtp: s.provide::<SmtpClient, _>().clone(),
+    ///     });
+    /// let mailer = services.provide::<MailSender, _>();
+    /// assert_eq!((mailer.iggy.0, mailer.smtp.0), ("iggy", "smtp"));
+    /// ```
+    pub fn compose_subservice<Service>(
+        self,
+        composer: impl FnOnce(&Self) -> Service,
+    ) -> ServiceBuilder<Service, Self> {
+        let new_service = composer(&self);
+        self.push(new_service)
+    }
+
     /// Create a cron job from a registered dependency and start a job list.
     ///
     /// `Job`'s [`Dep`](ServiceCreation::Dep) is looked up at `Position` and

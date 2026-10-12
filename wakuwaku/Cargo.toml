@@ -1,6 +1,6 @@
 [package]
 name = "wakuwaku"
-version = "1.0.0-rc1"
+version = "1.0.0-rc2"
 edition.workspace = true
 description = "Proof-driven microservice framework: type-level service builder, gRPC registration, cron jobs, and the wakuwaku crates in one dependency"
 license.workspace = true
