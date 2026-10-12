@@ -89,28 +89,32 @@
 //!
 //! Service implementations usually need shared dependencies such as a
 //! database pool, a Redis connection, or an audit layer. Instead of building
-//! each server by hand, implement [`ServiceCreation`] for the service
-//! implementation and let [`ServiceBuilder::grpc_service`] build it from a
-//! dependency that is already registered in the service builder, then wrap it
-//! into its server with the constructor you pass in (for tonic-generated
-//! servers, `XxxServer::new`).
+//! each server by hand, register the dependencies in a [`ServiceBuilder`]
+//! and build the servers from it with one of:
 //!
-//! `ServiceBuilder::grpc_service` returns a
-//! [`GrpcServiceRegisterCenterBuilder`], which chains more
-//! [`grpc_service`](GrpcServiceRegisterCenterBuilder::grpc_service) calls and
-//! ends with either:
+//! - [`ServiceBuilder::grpc_service`], for an implementation of
+//!   [`ServiceCreation`]: it is created from one registered dependency, which
+//!   is cloned out of the service builder, then wrapped into its server with
+//!   the constructor you pass in (for tonic-generated servers,
+//!   `XxxServer::new`).
+//! - [`ServiceBuilder::compose_grpc_service`], for any other server: a
+//!   closure borrows the service builder, takes whatever it needs from it
+//!   (or nothing, for an implementation assembled beforehand), and returns
+//!   the finished server. The implementation needs no `ServiceCreation`
+//!   impl and is not registered in the service builder.
+//!
+//! Both return a [`GrpcServiceRegisterCenterBuilder`], which chains more
+//! [`grpc_service`](GrpcServiceRegisterCenterBuilder::grpc_service) and
+//! [`compose_grpc_service`](GrpcServiceRegisterCenterBuilder::compose_grpc_service)
+//! calls in any order and ends with either:
 //!
 //! - [`into_router_fn`](GrpcServiceRegisterCenterBuilder::into_router_fn),
 //!   which gives back the service builder together with the
 //!   `impl FnOnce(Router<L>) -> Router<L>`, or
 //! - [`into_parts`](GrpcServiceRegisterCenterBuilder::into_parts), which
-//!   returns the service builder and the [`GrpcServiceRegisterCenter`] so you
-//!   can [`push`](GrpcServiceRegisterCenter::push) servers that are built by
-//!   hand.
+//!   returns the service builder and the [`GrpcServiceRegisterCenter`].
 //!
-//! Each server is created right away, when `grpc_service` is called. Its
-//! implementation's [`Dep`](ServiceCreation::Dep) is cloned out of the
-//! service builder.
+//! Each server is created right away, when it is registered.
 //!
 //! ```no_run
 //! use wakuwaku::deps::tonic::service::Routes;
@@ -161,10 +165,8 @@
 //! struct AdminStore;
 //! #[derive(Clone)]
 //! struct AuditLayer;
-//! /// Several dependencies are grouped into one registered value.
-//! #[derive(Clone)]
-//! struct AuditedAdminStore { store: AdminStore, audit: AuditLayer }
 //!
+//! // Built from one registered dependency.
 //! struct AdminAuthServiceImpl { store: AdminStore }
 //! impl ServiceCreation for AdminAuthServiceImpl {
 //!     type Dep = AdminStore;
@@ -177,39 +179,36 @@
 //!     fn create_service(store: AdminStore) -> Self { Self { store } }
 //! }
 //!
+//! // Needs two registered services: composed from the service builder.
 //! struct AdminManageServiceImpl { store: AdminStore, audit: AuditLayer }
-//! impl ServiceCreation for AdminManageServiceImpl {
-//!     type Dep = AuditedAdminStore;
-//!     fn create_service(dep: AuditedAdminStore) -> Self {
-//!         Self { store: dep.store, audit: dep.audit }
-//!     }
-//! }
 //!
-//! // Needs more than one registered service, so it is built by hand.
-//! struct UserAuthServiceImpl { store: AdminStore, audit: AuditLayer }
+//! // Assembled before the chain from values that are not registered.
+//! struct UserAuthServiceImpl { store: AdminStore, issuer: String }
 //!
 //! async fn serve() -> Result<(), Box<dyn std::error::Error>> {
 //!     let store = AdminStore;
-//!     let audit = AuditLayer;
+//!     let user_auth = UserAuthServiceImpl { store: store.clone(), issuer: "auth".into() };
 //!
-//!     // Type parameters: <Server, ServiceImpl, Position>. The server's own
-//!     // type parameter and the dependency's position are inferred with `_`.
-//!     // The argument turns the created implementation into its server.
-//!     let (services, register) = ServiceBuilder::new(store.clone())
-//!         .push(audit.clone())
-//!         .push(AuditedAdminStore { store, audit })
+//!     // `grpc_service` type parameters: <Server, ServiceImpl, Position>. The
+//!     // server's own type parameter and the dependency's position are
+//!     // inferred with `_`. The argument turns the created implementation
+//!     // into its server. `compose_grpc_service` infers everything from the
+//!     // server its closure returns.
+//!     let (services, register) = ServiceBuilder::new(store)
+//!         .push(AuditLayer)
 //!         .grpc_service::<AdminAuthServiceServer<_>, AdminAuthServiceImpl, _>(AdminAuthServiceServer::new)
 //!         .grpc_service::<AdminPersonalServer<_>, AdminPersonalServiceImpl, _>(AdminPersonalServer::new)
-//!         .grpc_service::<AccountManageServer<_>, AdminManageServiceImpl, _>(AccountManageServer::new)
-//!         .into_parts();
-//!
-//!     let user_auth = UserAuthServiceImpl {
-//!         store: services.provide::<AdminStore, _>().clone(),
-//!         audit: services.provide::<AuditLayer, _>().clone(),
-//!     };
-//!     let register = register
-//!         .push(UserAuthServer::new(user_auth))
+//!         .compose_grpc_service(|s| {
+//!             AccountManageServer::new(AdminManageServiceImpl {
+//!                 store: s.provide::<AdminStore, _>().clone(),
+//!                 audit: s.provide::<AuditLayer, _>().clone(),
+//!             })
+//!         })
+//!         .compose_grpc_service(|_| UserAuthServer::new(user_auth))
 //!         .into_router_fn();
+//!
+//!     // The service builder is still available to the rest of the app.
+//!     let _audit: &AuditLayer = services.provide::<AuditLayer, _>();
 //!
 //!     let router = Server::builder().add_routes(Routes::default());
 //!     register(router).serve("[::1]:50051".parse()?).await?;
@@ -262,13 +261,14 @@ impl<S> RoutableService for S where
 {
 }
 
-/// Registers [`ServiceCreation`] implementations built from a
-/// [`ServiceBuilder`] as gRPC servers.
+/// Registers gRPC servers built from a [`ServiceBuilder`].
 ///
 /// Pairs a service builder (`SHead`, `SChain`) with a
 /// [`GrpcServiceRegisterCenter`] (`Server`, `GChain`) that is being filled
-/// from it. Get one from [`ServiceBuilder::grpc_service`], register more
-/// servers with [`grpc_service`](Self::grpc_service), then finish with
+/// from it. Get one from [`ServiceBuilder::grpc_service`] or
+/// [`ServiceBuilder::compose_grpc_service`], register more servers with
+/// [`grpc_service`](Self::grpc_service) or
+/// [`compose_grpc_service`](Self::compose_grpc_service), then finish with
 /// [`into_router_fn`](Self::into_router_fn) or [`into_parts`](Self::into_parts).
 /// See the [module documentation](self#building-servers-from-a-servicebuilder)
 /// for an example.
@@ -321,6 +321,27 @@ impl<SH, SC, S, GC> GrpcServiceRegisterCenterBuilder<SH, SC, S, GC> {
     {
         let service_dep = self.builder.provide::<ServiceImpl::Dep, Position>().clone();
         let server = into_server(ServiceImpl::create_service(service_dep));
+        GrpcServiceRegisterCenterBuilder {
+            builder: self.builder,
+            register_center: self.register_center.push(server),
+        }
+    }
+
+    /// Build `NewServer` from any registered services and register it.
+    ///
+    /// `composer` borrows [`builder`](Self::builder), so it can
+    /// [`provide`](ServiceBuilder::provide) as many registered services as it
+    /// needs, or ignore it and move in a server whose implementation was
+    /// assembled by hand. It returns the finished server (for
+    /// tonic-generated servers, `XxxServer::new(implementation)`), whose type
+    /// is inferred. The implementation needs no [`ServiceCreation`] impl, and
+    /// the server is pushed onto the list the same way as
+    /// [`GrpcServiceRegisterCenter::push`].
+    pub fn compose_grpc_service<NewServer: RoutableService>(
+        self,
+        composer: impl FnOnce(&ServiceBuilder<SH, SC>) -> NewServer,
+    ) -> GrpcServiceRegisterCenterBuilder<SH, SC, NewServer, GrpcServiceRegisterCenter<S, GC>> {
+        let server = composer(&self.builder);
         GrpcServiceRegisterCenterBuilder {
             builder: self.builder,
             register_center: self.register_center.push(server),

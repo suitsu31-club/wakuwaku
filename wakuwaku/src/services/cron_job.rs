@@ -106,6 +106,11 @@
 //! # }
 //! ```
 //!
+//! A job that needs several registered services, or that is built by hand,
+//! is registered with
+//! [`compose_cron_job`](ServiceBuilder::compose_cron_job) instead; it needs
+//! no [`ServiceCreation`] impl.
+//!
 //! A job is unit-tested by calling [`process`](Processor::process) with a
 //! [`CronTick`] built by hand; no runtime is needed.
 
@@ -153,14 +158,15 @@ const fn assert_interval<Job: CronJob>() {
     );
 }
 
-/// Registers [`ServiceCreation`] cron jobs built from a [`ServiceBuilder`].
+/// Registers cron jobs built from a [`ServiceBuilder`].
 ///
 /// Pairs a service builder (`SHead`, `SChain`) with a [`CronRegisterCenter`]
 /// (`Job`, `CChain`) that is being filled from it. Get one from
-/// [`ServiceBuilder::cron_job`], register more jobs with
-/// [`cron_job`](Self::cron_job), then finish with [`start`](Self::start) or
-/// [`into_parts`](Self::into_parts). See the [module documentation](self)
-/// for an example.
+/// [`ServiceBuilder::cron_job`] or [`ServiceBuilder::compose_cron_job`],
+/// register more jobs with [`cron_job`](Self::cron_job) or
+/// [`compose_cron_job`](Self::compose_cron_job), then finish with
+/// [`start`](Self::start) or [`into_parts`](Self::into_parts). See the
+/// [module documentation](self) for an example.
 pub struct CronRegisterCenterBuilder<SHead, SChain, Job, CChain> {
     /// The service builder that job dependencies are taken from.
     pub builder: ServiceBuilder<SHead, SChain>,
@@ -204,6 +210,25 @@ impl<SH, SC, J, CC> CronRegisterCenterBuilder<SH, SC, J, CC> {
         CronRegisterCenterBuilder {
             builder: self.builder,
             register_center: self.register_center.push(NewJob::create_service(dep)),
+        }
+    }
+
+    /// Build `NewJob` from any registered services and register it.
+    ///
+    /// `composer` borrows [`builder`](Self::builder), so it can
+    /// [`provide`](ServiceBuilder::provide) as many registered services as it
+    /// needs, or ignore it and move in a job that was built by hand. The job
+    /// needs no [`ServiceCreation`] impl and is pushed onto the list the same
+    /// way as [`CronRegisterCenter::push`]. See
+    /// [`ServiceBuilder::compose_cron_job`] for an example.
+    pub fn compose_cron_job<NewJob: CronJob>(
+        self,
+        composer: impl FnOnce(&ServiceBuilder<SH, SC>) -> NewJob,
+    ) -> CronRegisterCenterBuilder<SH, SC, NewJob, CronRegisterCenter<J, CC>> {
+        let job = composer(&self.builder);
+        CronRegisterCenterBuilder {
+            builder: self.builder,
+            register_center: self.register_center.push(job),
         }
     }
 

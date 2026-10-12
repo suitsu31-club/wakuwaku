@@ -77,6 +77,10 @@ async fn main() {
     // Build gRPC servers and Iggy handlers from `services` the same way:
     // `services.grpc_service::<XxxServer<_>, Impl, _>(XxxServer::new)`,
     // `services.iggy_consumer::<Handler, _, _>()`.
+    // Components built from several services, or by hand, need no
+    // `ServiceCreation` impl: `.compose_cron_job(|s| ...)`,
+    // `.compose_grpc_service(|s| XxxServer::new(...))`,
+    // `.compose_iggy_consumer(|s| Arc::new(...))`.
     let _ = services;
 
     tokio::signal::ctrl_c().await.ok();

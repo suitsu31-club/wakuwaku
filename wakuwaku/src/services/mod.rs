@@ -1,9 +1,14 @@
 //! Building a service's components from shared dependencies.
 //!
 //! [`ServiceBuilder`](builder::ServiceBuilder) holds the shared
-//! dependencies, and every component that implements [`ServiceCreation`] is
-//! built from one of them. Each kind of component has its own register
-//! center, a type-level list filled straight from the service builder:
+//! dependencies. Each kind of component has its own register center, a
+//! type-level list filled straight from the service builder in one of two
+//! ways: from one registered dependency, for components that implement
+//! [`ServiceCreation`] (`cron_job`, `grpc_service`, `iggy_consumer`), or by
+//! a closure that borrows the service builder and returns the finished
+//! component (`compose_cron_job`, `compose_grpc_service`,
+//! `compose_iggy_consumer`), for components built from several services or
+//! by hand. Both kinds of registration chain in any order.
 //!
 //! | Component     | Trait                          | Module            | Feature |
 //! |---------------|--------------------------------|-------------------|---------|
@@ -28,9 +33,9 @@ pub mod iggy_consumer;
 /// components from services already registered in a
 /// [`ServiceBuilder`](builder::ServiceBuilder).
 ///
-/// The dependency is looked up by its type. If a component needs several
-/// dependencies, register a struct (or tuple) that holds them all and use
-/// that as `Dep`.
+/// The dependency is looked up by its type. A component that needs several
+/// dependencies, or that is assembled by hand, is registered with the
+/// `compose_*` methods instead, which need no `ServiceCreation` impl.
 pub trait ServiceCreation {
     /// The registered service this one is built from. It is cloned out of
     /// the builder, so it should be cheap to clone (a handle, `Arc`, or

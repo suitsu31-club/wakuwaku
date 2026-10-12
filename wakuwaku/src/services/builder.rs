@@ -190,6 +190,58 @@ impl<Head, Chain> ServiceBuilder<Head, Chain> {
         CronRegisterCenterBuilder::new(self, register_center)
     }
 
+    /// Build a cron job from any registered services and start a job list.
+    ///
+    /// The [`cron_job`](Self::cron_job) counterpart of
+    /// [`compose_subservice`](Self::compose_subservice): `composer` borrows
+    /// the whole builder, so it can [`provide`](Self::provide) as many
+    /// registered services as it needs, or ignore it and move in a job that
+    /// was built by hand. The job needs no [`ServiceCreation`] impl and is
+    /// not registered as a service. It becomes the first entry of a new
+    /// [`CronRegisterCenter`]; chain more jobs on the returned builder, then
+    /// call `start` or `into_parts`.
+    ///
+    /// ```
+    /// use std::time::Duration;
+    /// use wakuwaku::deps::kanau::processor::Processor;
+    /// use wakuwaku::services::builder::ServiceBuilder;
+    /// use wakuwaku::services::cron_job::{CronJob, CronTick};
+    ///
+    /// #[derive(Clone)]
+    /// struct Database;
+    /// #[derive(Clone)]
+    /// struct HttpClient;
+    ///
+    /// struct RotateKeys { db: Database, http: HttpClient }
+    /// impl Processor<CronTick> for RotateKeys {
+    ///     type Output = ();
+    ///     type Error = std::convert::Infallible;
+    ///     async fn process(&self, _: CronTick) -> Result<(), Self::Error> { Ok(()) }
+    /// }
+    /// impl CronJob for RotateKeys {
+    ///     const INTERVAL: Duration = Duration::from_secs(3600);
+    /// }
+    ///
+    /// # #[tokio::main(flavor = "current_thread")]
+    /// # async fn main() {
+    /// let (_services, cron) = ServiceBuilder::new(Database)
+    ///     .push(HttpClient)
+    ///     .compose_cron_job(|s| RotateKeys {
+    ///         db: s.provide::<Database, _>().clone(),
+    ///         http: s.provide::<HttpClient, _>().clone(),
+    ///     })
+    ///     .start();
+    /// cron.shutdown().await;
+    /// # }
+    /// ```
+    pub fn compose_cron_job<Job: CronJob>(
+        self,
+        composer: impl FnOnce(&Self) -> Job,
+    ) -> CronRegisterCenterBuilder<Head, Chain, Job, ()> {
+        let register_center = CronRegisterCenter::new(composer(&self));
+        CronRegisterCenterBuilder::new(self, register_center)
+    }
+
     /// Create an Iggy event handler from a registered dependency and start a
     /// handler list.
     ///
@@ -224,6 +276,42 @@ impl<Head, Chain> ServiceBuilder<Head, Chain> {
         super::iggy_consumer::IggyConsumerRegisterCenterBuilder::new(self, register_center)
     }
 
+    /// Build an Iggy event handler from any registered services and start a
+    /// handler list.
+    ///
+    /// The [`iggy_consumer`](Self::iggy_consumer) counterpart of
+    /// [`compose_subservice`](Self::compose_subservice): `composer` borrows
+    /// the whole builder, so it can [`provide`](Self::provide) as many
+    /// registered services as it needs, or ignore it and move in a handler
+    /// that was built by hand. It returns the handler in the [`Arc`] the
+    /// handler list stores, so an `Arc` that is shared elsewhere can be
+    /// registered as is. The handler needs no [`ServiceCreation`] impl and is
+    /// not registered as a service. It becomes the first entry of a new
+    /// [`IggyConsumerRegisterCenter`](wakuwaku_iggy::IggyConsumerRegisterCenter);
+    /// chain more handlers on the returned builder, then call `start` or
+    /// `into_parts`.
+    ///
+    /// `Handler` and `Event` are inferred from the returned handler when it
+    /// implements [`EventHandler`](wakuwaku_iggy::EventHandler) for only one
+    /// event; otherwise name the event, e.g.
+    /// `.compose_iggy_consumer::<_, MyEvent>(…)`. See the
+    /// [`iggy_consumer` module documentation](super::iggy_consumer) for an
+    /// example.
+    ///
+    /// [`Arc`]: std::sync::Arc
+    #[cfg(feature = "iggy")]
+    pub fn compose_iggy_consumer<Handler, Event>(
+        self,
+        composer: impl FnOnce(&Self) -> std::sync::Arc<Handler>,
+    ) -> super::iggy_consumer::IggyConsumerRegisterCenterBuilder<Head, Chain, Handler, Event, ()>
+    where
+        Handler: wakuwaku_iggy::EventHandler<Event>,
+        Event: wakuwaku_iggy::Event,
+    {
+        let register_center = wakuwaku_iggy::IggyConsumerRegisterCenter::new(composer(&self));
+        super::iggy_consumer::IggyConsumerRegisterCenterBuilder::new(self, register_center)
+    }
+
     /// Create a gRPC service implementation from a registered dependency,
     /// wrap it into its server, and start a server list.
     ///
@@ -255,6 +343,35 @@ impl<Head, Chain> ServiceBuilder<Head, Chain> {
         let service_dep = self.provide::<ServiceImpl::Dep, Position>().clone();
         let server = into_server(ServiceImpl::create_service(service_dep));
         let register_center = super::grpc_service::GrpcServiceRegisterCenter::new(server);
+        super::grpc_service::GrpcServiceRegisterCenterBuilder::new(self, register_center)
+    }
+
+    /// Build a gRPC server from any registered services and start a server
+    /// list.
+    ///
+    /// The [`grpc_service`](Self::grpc_service) counterpart of
+    /// [`compose_subservice`](Self::compose_subservice): `composer` borrows
+    /// the whole builder, so it can [`provide`](Self::provide) as many
+    /// registered services as it needs, or ignore it and move in a server
+    /// whose implementation was assembled by hand. It returns the finished
+    /// server (for tonic-generated servers, `XxxServer::new(implementation)`),
+    /// whose type is inferred. The implementation needs no
+    /// [`ServiceCreation`] impl and is not registered as a service. The
+    /// server becomes the first entry of a new
+    /// [`GrpcServiceRegisterCenter`](super::grpc_service::GrpcServiceRegisterCenter);
+    /// chain more servers on the returned builder, then call
+    /// `into_router_fn` or `into_parts`. See the
+    /// [`grpc_service` module documentation](super::grpc_service#building-servers-from-a-servicebuilder)
+    /// for an example.
+    #[cfg(feature = "grpc")]
+    pub fn compose_grpc_service<Server>(
+        self,
+        composer: impl FnOnce(&Self) -> Server,
+    ) -> super::grpc_service::GrpcServiceRegisterCenterBuilder<Head, Chain, Server, ()>
+    where
+        Server: super::grpc_service::RoutableService,
+    {
+        let register_center = super::grpc_service::GrpcServiceRegisterCenter::new(composer(&self));
         super::grpc_service::GrpcServiceRegisterCenterBuilder::new(self, register_center)
     }
 }
