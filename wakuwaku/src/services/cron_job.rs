@@ -378,8 +378,10 @@ impl<Job: CronJob, Chain: SpawnCronJobs> SpawnCronJobs for CronRegisterCenter<Jo
 
 /// Cron jobs started by [`CronRegisterCenter::start`].
 ///
-/// Call [`shutdown`](Self::shutdown) to stop the jobs gracefully. Dropping
-/// this value aborts every job, including runs in progress.
+/// Stop it with [`shutdown`](Self::shutdown), which lets the runs in progress
+/// finish, or [`abort`](Self::abort), which cancels them. Dropping this value
+/// aborts every job, including runs in progress, without waiting for them to
+/// stop.
 pub struct CronRuntime {
     tasks: JoinSet<()>,
     shutdown: watch::Sender<bool>,
@@ -387,9 +389,23 @@ pub struct CronRuntime {
 
 impl CronRuntime {
     /// Stop scheduling runs, and wait for the runs in progress to finish.
+    ///
+    /// This waits as long as the runs take. To bound the wait, wrap it in
+    /// [`tokio::time::timeout`]: dropping the unfinished future drops this
+    /// value, which aborts the runs still in progress.
     pub async fn shutdown(mut self) {
         self.shutdown.send_replace(true);
         while self.tasks.join_next().await.is_some() {}
+    }
+
+    /// Stop scheduling runs, cancel the runs in progress, and wait for the
+    /// jobs to stop.
+    ///
+    /// A run is cut off at its next `.await`, possibly midway through its
+    /// side effects. Prefer [`shutdown`](Self::shutdown) unless the runs in
+    /// progress can't be waited for.
+    pub async fn abort(mut self) {
+        self.tasks.shutdown().await;
     }
 }
 
@@ -714,10 +730,11 @@ mod tests {
         const INTERVAL: CronJobInterval = S::INTERVAL;
     }
 
-    /// Shuts a [`Slow`] job down at `stop_at`, while no run has finished, and
-    /// returns how many runs started and finished, observed three periods
-    /// after the shutdown.
-    async fn shut_down_slow_job<S: Schedule>(stop_at: Duration) -> (u64, u64) {
+    /// Stops a [`Slow`] job at `stop_at`, while no run has finished, with
+    /// [`CronRuntime::abort`] if `abort` and [`CronRuntime::shutdown`]
+    /// otherwise. Returns how many runs started and finished, observed three
+    /// periods after the stop.
+    async fn stop_slow_job<S: Schedule>(stop_at: Duration, abort: bool) -> (u64, u64) {
         let started = Arc::new(AtomicU64::new(0));
         let finished = Arc::new(AtomicU64::new(0));
         let cron = CronRegisterCenter::new(Slow::<S> {
@@ -729,7 +746,11 @@ mod tests {
         tokio::time::sleep(stop_at).await;
         assert_eq!(finished.load(Ordering::SeqCst), 0);
 
-        cron.shutdown().await;
+        if abort {
+            cron.abort().await;
+        } else {
+            cron.shutdown().await;
+        }
         tokio::time::sleep(PERIOD * 3).await;
         (
             started.load(Ordering::SeqCst),
@@ -739,14 +760,27 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn shutdown_lets_the_run_in_progress_finish_and_stops_the_schedule() {
-        assert_eq!(shut_down_slow_job::<AtLeast>(PERIOD / 4).await, (1, 1));
+        assert_eq!(stop_slow_job::<AtLeast>(PERIOD / 4, false).await, (1, 1));
     }
 
     #[tokio::test(start_paused = true)]
     async fn shutdown_lets_every_overlapping_run_finish() {
         assert_eq!(
-            shut_down_slow_job::<AfterStart>(PERIOD + PERIOD / 4).await,
+            stop_slow_job::<AfterStart>(PERIOD + PERIOD / 4, false).await,
             (2, 2)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn abort_cancels_the_run_in_progress_and_stops_the_schedule() {
+        assert_eq!(stop_slow_job::<AtLeast>(PERIOD / 4, true).await, (1, 0));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn abort_cancels_every_overlapping_run() {
+        assert_eq!(
+            stop_slow_job::<AfterStart>(PERIOD + PERIOD / 4, true).await,
+            (2, 0)
         );
     }
 

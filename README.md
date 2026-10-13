@@ -90,6 +90,8 @@ async fn main() {
 
 Cron jobs run locally. `INTERVAL` says how runs are spaced: `AfterFinish(d)` waits `d` after each run ends, `AtLeast(d)` starts runs at least `d` apart without overlapping (an overrunning run is followed at once), and `AfterStart(d)` starts runs on a fixed grid of `d` even if they overlap. Every replica runs its own jobs, so make jobs idempotent or partition their work.
 
+`CronRuntime` and the Iggy `ConsumerRuntime` stop the same way: `shutdown()` stops starting new work and waits for the work in flight to finish, `abort()` cancels the work in flight at its next `.await`. Dropping either runtime aborts without waiting.
+
 ## Migrating from 0.3
 
 - RabbitMQ is gone: `integration::amqp`, `services::amqp_consumer` and `ServiceBuilder::amqp_consumer` are replaced by `wakuwaku::iggy` and `ServiceBuilder::iggy_consumer`.

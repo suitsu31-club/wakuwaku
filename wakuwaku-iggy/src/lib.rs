@@ -186,6 +186,7 @@
 //!         .start(client, ConsumerConfig::new("shop", "points", vec![1]))
 //!         .await?;
 //!     tokio::signal::ctrl_c().await?;
+//!     // Lets the batches in flight finish; `abort` would cancel them.
 //!     runtime.shutdown().await;
 //!     Ok(())
 //! }

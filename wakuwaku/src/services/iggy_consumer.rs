@@ -115,6 +115,7 @@
 //!
 //!     let _mailer: &Mailer = services.provide::<Mailer, _>();
 //!     tokio::signal::ctrl_c().await?;
+//!     // Lets the batches in flight finish; `abort` would cancel them.
 //!     consumers.shutdown().await;
 //!     Ok(())
 //! }

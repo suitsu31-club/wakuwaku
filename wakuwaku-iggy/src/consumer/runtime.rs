@@ -25,22 +25,53 @@ use iggy::prelude::{
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tokio::sync::watch;
 use tokio::task::JoinSet;
 
 /// Running partition tasks started by
 /// [`IggyConsumerRegisterCenter::start`](crate::consumer::IggyConsumerRegisterCenter::start).
 ///
-/// Dropping this value aborts every partition task. Work in flight is lost
-/// as far as the [`DeliveryMode`] allows: in
+/// Stop it with [`shutdown`](Self::shutdown), which lets the batches in
+/// flight finish, or [`abort`](Self::abort), which cancels them. Dropping this
+/// value aborts every partition task without waiting for them to stop.
+///
+/// Aborted work is lost as far as the [`DeliveryMode`] allows: in
 /// [`NoEventLose`](DeliveryMode::NoEventLose), everything not yet committed is
-/// read again by the next consumer with the same name.
+/// read again by the next consumer with the same name, so a handler may run
+/// again for an event it was interrupted in.
 pub struct ConsumerRuntime {
     tasks: JoinSet<()>,
+    shutdown: watch::Sender<bool>,
 }
 
 impl ConsumerRuntime {
-    /// Abort every partition task and wait for them to stop.
+    /// Stop polling, and wait for the work in flight to finish.
+    ///
+    /// Each partition task finishes the handler calls it has started, writes
+    /// their failures to the retry partition and stores its offsets, then
+    /// stops; it polls no further records and starts no further retries.
+    /// Retries not run yet are left as on a crash: in
+    /// [`NoEventLose`](DeliveryMode::NoEventLose) the next consumer with the
+    /// same name reads them again, in
+    /// [`NoDoubleConsume`](DeliveryMode::NoDoubleConsume) those already read
+    /// from the retry partition are lost.
+    ///
+    /// This waits as long as the work in flight takes, including retrying
+    /// Iggy requests while the server is unreachable. To bound the wait, wrap
+    /// it in [`tokio::time::timeout`]: dropping the unfinished future drops
+    /// this value, which aborts the tasks still running.
     pub async fn shutdown(mut self) {
+        self.shutdown.send_replace(true);
+        while self.tasks.join_next().await.is_some() {}
+    }
+
+    /// Cancel every partition task now, including handler calls in progress,
+    /// and wait for them to stop.
+    ///
+    /// A handler is cut off at its next `.await`, possibly midway through
+    /// side effects outside Iggy. Prefer [`shutdown`](Self::shutdown) unless
+    /// the work in flight can't be waited for.
+    pub async fn abort(mut self) {
         self.tasks.shutdown().await;
     }
 }
@@ -110,6 +141,7 @@ pub(crate) async fn start<L: HandlerList>(
 
     let keys = Arc::new(HeaderKeys::new()?);
     let consumer = Consumer::new(Identifier::try_from(config.consumer_name.as_str())?);
+    let (shutdown, stop) = watch::channel(false);
     let mut tasks = JoinSet::new();
     for &partition in &config.partitions {
         let task = PartitionTask {
@@ -122,10 +154,11 @@ pub(crate) async fn start<L: HandlerList>(
             retry_topic: retry_topic.clone(),
             consumer: consumer.clone(),
             partition,
+            stop: stop.clone(),
         };
         tasks.spawn(task.run());
     }
-    Ok(ConsumerRuntime { tasks })
+    Ok(ConsumerRuntime { tasks, shutdown })
 }
 
 struct PartitionTask<L> {
@@ -138,6 +171,8 @@ struct PartitionTask<L> {
     retry_topic: Identifier,
     consumer: Consumer,
     partition: u32,
+    /// Holds `true` once shutdown is requested; see [`ConsumerRuntime::shutdown`].
+    stop: watch::Receiver<bool>,
 }
 
 /// Read position in one partition.
@@ -193,13 +228,26 @@ impl<L: HandlerList> PartitionTask<L> {
         self.config.retry_delays
     }
 
+    /// Consume the partition until shutdown is requested.
+    ///
+    /// Shutdown cancels only waits for new work (reading offsets, polling,
+    /// idling); work that has started runs to the end of its iteration,
+    /// including storing offsets.
     async fn run(self) {
-        let mut main = self.stored_cursor(&self.main_topic).await;
-        let mut retry = self.stored_cursor(&self.retry_topic).await;
+        let Some(mut main) = self.unless_stopped(self.stored_cursor(&self.main_topic)).await
+        else {
+            return;
+        };
+        let Some(mut retry) = self.unless_stopped(self.stored_cursor(&self.retry_topic)).await
+        else {
+            return;
+        };
         let mut state = RetryState::new(self.delays());
         let mut retry_stored = None;
         loop {
-            self.drain_retry(&mut state, &mut retry).await;
+            if self.drain_retry(&mut state, &mut retry).await.is_none() {
+                return;
+            }
             self.run_due(&mut state).await;
             if self.config.mode == DeliveryMode::NoEventLose
                 && let Some(offset) = state.committable(retry.next_or_zero())
@@ -209,7 +257,9 @@ impl<L: HandlerList> PartitionTask<L> {
                 retry_stored = Some(offset);
             }
 
-            let polled = self.poll(&self.main_topic, main).await;
+            let Some(polled) = self.unless_stopped(self.poll(&self.main_topic, main)).await else {
+                return;
+            };
             let Some(last) = polled.messages.last().map(|m| m.header.offset) else {
                 let idle = state
                     .next_due()
@@ -217,7 +267,9 @@ impl<L: HandlerList> PartitionTask<L> {
                     .map_or(self.config.poll_interval, |until| {
                         until.min(self.config.poll_interval)
                     });
-                tokio::time::sleep(idle).await;
+                if self.unless_stopped(tokio::time::sleep(idle)).await.is_none() {
+                    return;
+                }
                 continue;
             };
             if self.config.mode == DeliveryMode::NoDoubleConsume {
@@ -228,6 +280,19 @@ impl<L: HandlerList> PartitionTask<L> {
                 self.store(&self.main_topic, last).await;
             }
             main.next = Some(last.saturating_add(1));
+        }
+    }
+
+    /// `future`'s output, or `None` once shutdown is requested, in which case
+    /// `future` is dropped unfinished.
+    async fn unless_stopped<T>(&self, future: impl Future<Output = T>) -> Option<T> {
+        let mut stop = self.stop.clone();
+        tokio::select! {
+            biased;
+            // An error means the runtime was dropped, which aborts this task
+            // anyway.
+            _ = stop.wait_for(|&stop| stop) => None,
+            value = future => Some(value),
         }
     }
 
@@ -272,12 +337,13 @@ impl<L: HandlerList> PartitionTask<L> {
         .await
     }
 
-    /// Read the retry partition to its end into `state`.
-    async fn drain_retry(&self, state: &mut RetryState, cursor: &mut Cursor) {
+    /// Read the retry partition to its end into `state`, or stop early and
+    /// return `None` once shutdown is requested.
+    async fn drain_retry(&self, state: &mut RetryState, cursor: &mut Cursor) -> Option<()> {
         loop {
-            let polled = self.poll(&self.retry_topic, *cursor).await;
+            let polled = self.unless_stopped(self.poll(&self.retry_topic, *cursor)).await?;
             let Some(last) = polled.messages.last().map(|m| m.header.offset) else {
-                return;
+                return Some(());
             };
             let now = Instant::now();
             let now_ms = now_ms();
