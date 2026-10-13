@@ -1,27 +1,9 @@
 //! Searches the server runs for a client.
 //!
-//! A [`SearchRequest`] is what a client may ask for. It deserializes from
-//! the client's JSON and can only name the fields its index allows:
+//! A [`SearchRequest`] is what a client may ask, deserialized from its JSON;
+//! a [`Search`] runs it under a scope set by the server.
 //!
-//! ```json
-//! {
-//!   "q": "rust",
-//!   "filter": {"gte": ["published_at", 1700000000]},
-//!   "sort": [{"field": "published_at", "order": "desc"}],
-//!   "facets": ["tags"],
-//!   "page": 2,
-//!   "hitsPerPage": 20
-//! }
-//! ```
-//!
-//! A [`Search`] adds what the server enforces: a scope the client can't
-//! remove, and a bound on the page size. The scope and the client's filter
-//! are sent as separate elements of an array of filters, which Meilisearch
-//! parses one by one before combining them with `AND`, so nothing in the
-//! client's filter can lift the scope.
-//!
-//! The documents returned are deserialized as [`SearchIndex::Document`], so
-//! attributes outside it never reach the client through the server.
+//! See the [search guide](https://www.wakuwaku.rs/en/docs/data/meilisearch/search#running-a-search-under-a-scope).
 
 use crate::effect::io::Read;
 use crate::meilisearch::filter::{Field, Filter, FilterError, Sort};
@@ -42,8 +24,19 @@ pub const DEFAULT_MAX_HITS_PER_PAGE: usize = 100;
 
 /// What a client may ask of a search on the index `I`.
 ///
-/// Unknown fields are rejected, so a client can't expect an option the
-/// server ignores.
+/// Every field is optional; unknown fields are rejected, so a client can't
+/// expect an option the server ignores:
+///
+/// ```json
+/// {
+///   "q": "rust",
+///   "filter": {"gte": ["published_at", 1700000000]},
+///   "sort": [{"field": "published_at", "order": "desc"}],
+///   "facets": ["tags"],
+///   "page": 2,
+///   "hitsPerPage": 20
+/// }
+/// ```
 #[derive(Serialize, Deserialize)]
 #[serde(
     rename_all = "camelCase",
@@ -136,6 +129,10 @@ pub struct Search<I: SearchIndex> {
 
 impl<I: SearchIndex> Search<I> {
     /// Run `request` on the documents matching `scope` only.
+    ///
+    /// The scope and the request's filter are sent as separate elements of
+    /// Meilisearch's filter array, parsed one by one and combined with
+    /// `AND`, so nothing in the request's filter can lift the scope.
     pub const fn scoped(request: SearchRequest<I>, scope: Filter<I::Filterable>) -> Self {
         Self {
             request,
@@ -178,6 +175,7 @@ impl<I: SearchIndex> Query for Search<I> {
 
 impl<I: SearchIndex> Execute<MeiliSource> for Search<I> {
     type Output = SearchResults<I::Document>;
+    type Error = Error;
 
     async fn execute(self, client: &mut Arc<Client>) -> Result<Self::Output, Error> {
         let request = self.request;

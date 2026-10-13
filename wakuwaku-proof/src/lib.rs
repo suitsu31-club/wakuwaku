@@ -4,13 +4,15 @@
     clippy::panic_in_result_fn,
     clippy::arithmetic_side_effects
 )]
-
 #![warn(missing_docs)]
-
+#![doc(
+    html_logo_url = "https://raw.githubusercontent.com/suitsu31-club/wakuwaku-docs/main/icon.svg"
+)]
 #![doc = include_str!("../README.md")]
 
 pub mod boolean_algebra;
 
+use std::convert::Infallible;
 use std::ops::Deref;
 
 #[cfg(doc)]
@@ -139,9 +141,9 @@ impl<P> Deref for Evidence<P> {
 /// check produced.
 ///
 /// The fields are private. Outside this crate a `Proven` can only come from [`prove`],
-/// or from an existing proof via [`Proven::from_a`] / [`Proven::from_b`] (for [`Or`]),
-/// [`Proven::from_both`] / [`Proven::into_a`] / [`Proven::into_b`] (for [`And`]), or
-/// [`Proven::derive`] (see [`TermDerive`]).
+/// from [`PureVerifier::prove`], or from an existing proof via [`Proven::from_a`] /
+/// [`Proven::from_b`] (for [`Or`]), [`Proven::from_both`] / [`Proven::into_a`] /
+/// [`Proven::into_b`] (for [`And`]), or [`Proven::derive`] (see [`TermDerive`]).
 ///
 /// The subject is owned and only exposed through `&T`, so it cannot be mutated after
 /// the check (interior mutability excepted). The evidence is only exposed through
@@ -211,6 +213,73 @@ pub async fn prove<T, P: Predicate<T>>(
     })
 }
 
+/// A pure check that `P` holds for a `T`, given as a function pointer. Together with
+/// [`prove`], one of the two ways to obtain a [`Proven`].
+///
+/// The function sees only the subject: no context, no I/O, no [`CheckOrder`]. It returns
+/// the evidence, or [`ValidateError::Deny`]; the [`Infallible`] I/O error rules out
+/// [`ValidateError::IoError`]. `P` is only the evidence type and need not implement
+/// [`Predicate`].
+///
+/// [`new`](Self::new) is a `const fn` and a function pointer is always [`Send`] and
+/// [`Sync`], whatever `T` and `P` are, so a verifier can be declared as a `static` or a
+/// `const`.
+///
+/// Whoever writes the function decides what it proves, exactly as with a [`Predicate`]
+/// implementation. The function must return a `P`, so only code that can construct a `P`
+/// can write a verifier for it: give the evidence type a private field to keep its
+/// proofs in its defining module.
+///
+/// ```
+/// use std::convert::Infallible;
+/// use wakuwaku_proof::{DeniedReason, PureVerifier, ValidateError};
+///
+/// static EMPTY: DeniedReason = DeniedReason("username is empty");
+///
+/// pub struct NonEmpty(());
+///
+/// fn non_empty(name: &String) -> Result<NonEmpty, ValidateError<Infallible>> {
+///     if name.is_empty() { Err(ValidateError::Deny(EMPTY)) } else { Ok(NonEmpty(())) }
+/// }
+///
+/// pub static NON_EMPTY: PureVerifier<String, NonEmpty> = PureVerifier::new(non_empty);
+/// pub const NON_EMPTY_CONST: PureVerifier<String, NonEmpty> = PureVerifier::new(non_empty);
+///
+/// let name = NON_EMPTY.prove("haruki".to_owned());
+/// assert!(matches!(name, Ok(proof) if proof.subject() == "haruki"));
+///
+/// // `Deny` is the only possible error.
+/// let Err(ValidateError::Deny(reason)) = NON_EMPTY_CONST.prove(String::new()) else {
+///     unreachable!()
+/// };
+/// assert_eq!(reason, EMPTY);
+/// ```
+pub struct PureVerifier<T, P> {
+    check: fn(&T) -> Result<P, ValidateError<Infallible>>,
+}
+
+impl<T, P> PureVerifier<T, P> {
+    /// A verifier that runs `check`.
+    pub const fn new(check: fn(&T) -> Result<P, ValidateError<Infallible>>) -> Self {
+        Self { check }
+    }
+
+    /// Runs the check against `subject` and, if it holds, wraps the subject and the
+    /// evidence in [`Proven`].
+    ///
+    /// # Errors
+    ///
+    /// Returns the [`ValidateError::Deny`] from the check. The subject is dropped in that
+    /// case.
+    pub fn prove(&self, subject: T) -> Result<Proven<T, P>, ValidateError<Infallible>> {
+        let evidence = (self.check)(&subject)?;
+        Ok(Proven {
+            subject,
+            evidence: Evidence(evidence),
+        })
+    }
+}
+
 /// Conjunction: holds when both `A` and `B` hold for the subject. The evidence is the
 /// evidence of both operands.
 ///
@@ -243,10 +312,7 @@ impl<T: Eq, A, B> Proven<T, And<A, B>> {
     /// # Errors
     ///
     /// Returns both proofs unchanged if the subjects differ.
-    pub fn from_both(
-        a: Proven<T, A>,
-        b: Proven<T, B>,
-    ) -> Result<Self, Mismatched<T, A, B>> {
+    pub fn from_both(a: Proven<T, A>, b: Proven<T, B>) -> Result<Self, Mismatched<T, A, B>> {
         if a.subject != b.subject {
             return Err((a, b));
         }
@@ -392,11 +458,10 @@ where
 /// the method-call form. The derived proof is about the same subject at the same
 /// moment as the original, with the same caveats (see [`Proven`]).
 ///
-/// `R` names the law that justifies the step. Without it, laws would be overlapping
-/// impls of one trait: [`Commute`] and [`Associate`] both rewrite `(A ∧ A) ∧ A` into
-/// `A ∧ (A ∧ A)`, which Rust rejects. `R` is normally inferred from the source and
-/// target types; when more than one law fits, as in that example, name it:
-/// `proof.derive::<_, Associate>()`.
+/// `R` names the law that justifies the step, so laws do not overlap as impls. It is
+/// normally inferred from the source and target types; when more than one law fits
+/// (both [`Commute`] and [`Associate`] rewrite `(A ∧ A) ∧ A` into `A ∧ (A ∧ A)`), name
+/// it: `proof.derive::<_, Associate>()`.
 ///
 /// # Provided laws
 ///
@@ -437,9 +502,9 @@ where
 /// # Implementing
 ///
 /// `term_derive` must return a [`Proven<T, P>`], which outside this crate can only be
-/// obtained from [`prove`] or by transforming existing proofs. An implementation
-/// therefore cannot fabricate evidence, and adding laws for your own predicates is
-/// sound. Give each new law its own rule type for `R`.
+/// obtained from [`prove`], from [`PureVerifier::prove`], or by transforming existing
+/// proofs. An implementation therefore cannot fabricate evidence, and adding laws for
+/// your own predicates is sound. Give each new law its own rule type for `R`.
 ///
 /// # Example
 ///
@@ -514,4 +579,3 @@ pub trait TermDerive<P, T, R>: Predicate<T> {
     /// `Self` held for the subject, so `P` holds for it.
     fn term_derive(proof: Proven<T, Self>) -> Proven<T, P>;
 }
-

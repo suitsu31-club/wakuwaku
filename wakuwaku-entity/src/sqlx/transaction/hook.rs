@@ -2,25 +2,21 @@
 //!
 //! [`AfterTransaction`] wraps a sqlx [`Db`] handle. After every
 //! [`Transaction`] whose flow ran, it hands the flow's report and what
-//! became of the transaction ([`TxFinalState`]) to its hook. Whether to act
-//! on a commit, a rollback, or an unknown commit is the hook's choice.
-//!
-//! As with [write hooks](crate::effect::hook), a hook error goes to an error
-//! handler whose own error is [`Infallible`], and never changes what the
-//! caller gets.
+//! became of the transaction ([`TxFinalState`]) to its hook. A hook error
+//! goes to an error handler whose own error is [`Infallible`], and never
+//! changes what the caller gets.
 //!
 //! Queries run on their own are forwarded to the wrapped handle, so write
-//! hooks can wrap this one: `AfterWrite<AfterTransaction<Db<_, _>, _, _>, _, _>`.
-//! Reach the transaction hook again through
+//! hooks can wrap this one; reach it again through
 //! [`AfterWrite::inner`](crate::effect::hook::AfterWrite::inner).
+//!
+//! See the [transactions guide](https://www.wakuwaku.rs/en/docs/data/transactions#hooking-the-end-of-a-transaction).
 
 use crate::effect::hook::run_hook;
 use crate::effect::io::Covers;
 use crate::query::{Db, Execute};
 use crate::sqlx::backend::{SqlxBackend, SqlxSource};
-use crate::sqlx::transaction::{
-    FlowEffect, Transaction, TxError, TxFinalState, TxFlow, TxOutput, drive,
-};
+use crate::sqlx::transaction::{Transaction, TxError, TxFinalState, TxFlow, TxOutput, drive};
 use kanau::processor::{Processor, ProcessorReturn};
 use std::convert::Infallible;
 
@@ -35,7 +31,11 @@ pub struct AfterTransaction<D, H, EH> {
 impl<D, H, EH> AfterTransaction<D, H, EH> {
     /// Wrap `inner`, sending hook errors to `on_error`.
     pub const fn new(inner: D, hook: H, on_error: EH) -> Self {
-        Self { inner, hook, on_error }
+        Self {
+            inner,
+            hook,
+            on_error,
+        }
     }
 
     /// The wrapped handle.
@@ -48,7 +48,7 @@ impl<DB, C, F, H, EH> Processor<Transaction<F>> for AfterTransaction<Db<SqlxSour
 where
     DB: SqlxBackend,
     F: TxFlow<Database = DB>,
-    C: Covers<FlowEffect<F>>,
+    C: Covers<F::Effect>,
     H: Processor<TxFinalState<F::Report>> + Sync,
     H::Error: Send,
     EH: Processor<H::Error, Error = Infallible> + Sync,
@@ -74,7 +74,7 @@ where
     EH: Sync,
 {
     type Output = Q::Output;
-    type Error = ::sqlx::Error;
+    type Error = Q::Error;
 
     fn process(
         &self,

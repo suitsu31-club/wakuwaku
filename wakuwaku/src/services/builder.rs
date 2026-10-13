@@ -1,14 +1,16 @@
 //! Compile-time, type-indexed service registry.
 //!
-//! [`ServiceBuilder`] stores services in a heterogeneous, singly linked list
-//! built at the type level. Each [`push`](ServiceBuilder::push) wraps the
-//! current builder in a new node, and [`provide`](ServiceBuilder::provide)
-//! looks a service up by its type. Lookup is resolved entirely by the trait
-//! solver: there is no `Any`, no downcasting, and no runtime map, so asking
-//! for a service that was never registered is a compile error rather than a
-//! panic.
+//! [`ServiceBuilder`] is a type-level list of registered services:
+//! [`push`](ServiceBuilder::push) adds one, [`provide`](ServiceBuilder::provide)
+//! borrows one by its type, and the lookup is the trait bound [`ProvideAt`],
+//! resolved by the compiler at a position ([`Here`], [`There`]). Asking for a
+//! service that was never registered is a compile error.
 //!
-//! # Example
+//! Services can also be built from registered ones and pushed with
+//! [`construct_subservice`](ServiceBuilder::construct_subservice) and
+//! [`compose_subservice`](ServiceBuilder::compose_subservice). Components are
+//! registered with `cron_job`, `grpc_service`, `iggy_consumer` and their
+//! `compose_*` counterparts.
 //!
 //! ```
 //! use wakuwaku::services::builder::ServiceBuilder;
@@ -17,12 +19,8 @@
 //! struct Counter(u32);
 //!
 //! let services = ServiceBuilder::new(Config { name: "api" }).push(Counter(7));
-//!
-//! // The position index is inferred with `_`.
-//! let config: &Config = services.provide::<Config, _>();
-//! let counter: &Counter = services.provide::<Counter, _>();
-//! assert_eq!(config.name, "api");
-//! assert_eq!(counter.0, 7);
+//! assert_eq!(services.provide::<Config, _>().name, "api");
+//! assert_eq!(services.provide::<Counter, _>().0, 7);
 //! ```
 //!
 //! Requesting an unregistered type fails to compile:
@@ -34,19 +32,7 @@
 //! let _: &String = services.provide::<String, _>();
 //! ```
 //!
-//! # Duplicate types
-//!
-//! When the same type is registered more than once, the index cannot be
-//! inferred and must be spelled out. [`Here`] is the most recently pushed
-//! service; each [`There`] steps one node further back:
-//!
-//! ```
-//! use wakuwaku::services::builder::{Here, ServiceBuilder, There};
-//!
-//! let services = ServiceBuilder::new(1u32).push(2u32);
-//! assert_eq!(*services.provide::<u32, Here>(), 2);
-//! assert_eq!(*services.provide::<u32, There<Here>>(), 1);
-//! ```
+//! See the [service builder guide](https://www.wakuwaku.rs/en/docs/core/service-builder).
 
 use crate::services::ServiceCreation;
 use crate::services::cron_job::{CronJob, CronRegisterCenter, CronRegisterCenterBuilder};
@@ -57,7 +43,7 @@ use std::marker::PhantomData;
 /// `T` is the service stored at this node and `Chain` is the rest of the list:
 /// either another `ServiceBuilder` or `()` for the first registered service.
 /// Construct one with [`ServiceBuilder::new`] and extend it with
-/// [`ServiceBuilder::push`]. See the [module documentation](self) for usage.
+/// [`ServiceBuilder::push`].
 #[derive(Clone)]
 pub struct ServiceBuilder<T, Chain = ()> {
     this: T,
@@ -81,14 +67,97 @@ impl<Head, Chain> ServiceBuilder<Head, Chain> {
     ///
     /// `I` is the service's position in the list. Pass `_` to let the
     /// compiler infer it; this works whenever `T` is registered exactly once.
-    /// If `T` is registered several times, name the position explicitly with
-    /// [`Here`] / [`There`].
+    /// If `T` is registered several times, name the position explicitly:
+    /// [`Here`] is the most recently pushed service, and each [`There`] steps
+    /// one node further back.
+    ///
+    /// ```
+    /// use wakuwaku::services::builder::{Here, ServiceBuilder, There};
+    ///
+    /// let services = ServiceBuilder::new(1u32).push(2u32);
+    /// assert_eq!(*services.provide::<u32, Here>(), 2);
+    /// assert_eq!(*services.provide::<u32, There<Here>>(), 1);
+    /// ```
     pub fn provide<T, I>(&self) -> &T
     where
         Self: ProvideAt<T, I>,
         I: ServiceBuilderPosition,
     {
         <Self as ProvideAt<T, I>>::provide_at(self)
+    }
+
+    /// Create a service from a registered dependency and register it.
+    ///
+    /// `Service`'s [`Dep`](ServiceCreation::Dep) is looked up at `Position`
+    /// and cloned. The service is then created with
+    /// [`create_service`](ServiceCreation::create_service) and pushed, so it
+    /// is found at [`Here`] and can itself be the dependency of the
+    /// components registered after it.
+    ///
+    /// `Position` can usually be passed as `_`; it is inferred when the
+    /// dependency's type is registered exactly once.
+    ///
+    /// ```
+    /// use wakuwaku::services::ServiceCreation;
+    /// use wakuwaku::services::builder::ServiceBuilder;
+    ///
+    /// #[derive(Clone)]
+    /// struct CommonDep { db_url: &'static str }
+    ///
+    /// struct UserRepo { db_url: &'static str }
+    ///
+    /// impl ServiceCreation for UserRepo {
+    ///     type Dep = CommonDep;
+    ///     fn create_service(dep: CommonDep) -> Self { Self { db_url: dep.db_url } }
+    /// }
+    ///
+    /// let services = ServiceBuilder::new(CommonDep { db_url: "postgres://db" })
+    ///     .construct_subservice::<UserRepo, _>();
+    /// assert_eq!(services.provide::<UserRepo, _>().db_url, "postgres://db");
+    /// ```
+    pub fn construct_subservice<Service, Position>(self) -> ServiceBuilder<Service, Self>
+    where
+        Service: ServiceCreation,
+        Position: ServiceBuilderPosition,
+        Self: ProvideAt<Service::Dep, Position>,
+    {
+        let new_service_dep = self.provide::<Service::Dep, Position>().clone();
+        let new_service = Service::create_service(new_service_dep);
+        self.push(new_service)
+    }
+
+    /// Build a service from any registered services and register it.
+    ///
+    /// `composer` borrows the builder, so it can [`provide`](Self::provide)
+    /// as many registered services as it needs. The result is pushed, so it
+    /// is found at [`Here`] and can be the dependency of the components
+    /// registered after it.
+    ///
+    /// ```
+    /// use wakuwaku::services::builder::ServiceBuilder;
+    ///
+    /// #[derive(Clone)]
+    /// struct IggyClient(&'static str);
+    /// #[derive(Clone)]
+    /// struct SmtpClient(&'static str);
+    ///
+    /// struct MailSender { iggy: IggyClient, smtp: SmtpClient }
+    ///
+    /// let services = ServiceBuilder::new(IggyClient("iggy"))
+    ///     .push(SmtpClient("smtp"))
+    ///     .compose_subservice(|s| MailSender {
+    ///         iggy: s.provide::<IggyClient, _>().clone(),
+    ///         smtp: s.provide::<SmtpClient, _>().clone(),
+    ///     });
+    /// let mailer = services.provide::<MailSender, _>();
+    /// assert_eq!((mailer.iggy.0, mailer.smtp.0), ("iggy", "smtp"));
+    /// ```
+    pub fn compose_subservice<Service>(
+        self,
+        composer: impl FnOnce(&Self) -> Service,
+    ) -> ServiceBuilder<Service, Self> {
+        let new_service = composer(&self);
+        self.push(new_service)
     }
 
     /// Create a cron job from a registered dependency and start a job list.
@@ -111,6 +180,56 @@ impl<Head, Chain> ServiceBuilder<Head, Chain> {
     {
         let dep = self.provide::<Job::Dep, Position>().clone();
         let register_center = CronRegisterCenter::new(Job::create_service(dep));
+        CronRegisterCenterBuilder::new(self, register_center)
+    }
+
+    /// Build a cron job by a closure and start a job list.
+    ///
+    /// `composer` borrows the builder, so it can [`provide`](Self::provide)
+    /// as many registered services as it needs, or ignore it and move in a
+    /// job built by hand. The job needs no [`ServiceCreation`] impl, is not
+    /// registered as a service, and is not cloned. It becomes the first entry
+    /// of a new [`CronRegisterCenter`]; chain more jobs on the returned
+    /// builder, then call `start` or `into_parts`.
+    ///
+    /// ```
+    /// use std::time::Duration;
+    /// use wakuwaku::deps::kanau::processor::Processor;
+    /// use wakuwaku::services::builder::ServiceBuilder;
+    /// use wakuwaku::services::cron_job::{CronJob, CronJobInterval, CronTick};
+    ///
+    /// #[derive(Clone)]
+    /// struct Database;
+    /// #[derive(Clone)]
+    /// struct HttpClient;
+    ///
+    /// struct RotateKeys { db: Database, http: HttpClient }
+    /// impl Processor<CronTick> for RotateKeys {
+    ///     type Output = ();
+    ///     type Error = std::convert::Infallible;
+    ///     async fn process(&self, _: CronTick) -> Result<(), Self::Error> { Ok(()) }
+    /// }
+    /// impl CronJob for RotateKeys {
+    ///     const INTERVAL: CronJobInterval = CronJobInterval::AfterFinish(Duration::from_secs(3600));
+    /// }
+    ///
+    /// # #[tokio::main(flavor = "current_thread")]
+    /// # async fn main() {
+    /// let (_services, cron) = ServiceBuilder::new(Database)
+    ///     .push(HttpClient)
+    ///     .compose_cron_job(|s| RotateKeys {
+    ///         db: s.provide::<Database, _>().clone(),
+    ///         http: s.provide::<HttpClient, _>().clone(),
+    ///     })
+    ///     .start();
+    /// cron.shutdown().await;
+    /// # }
+    /// ```
+    pub fn compose_cron_job<Job: CronJob>(
+        self,
+        composer: impl FnOnce(&Self) -> Job,
+    ) -> CronRegisterCenterBuilder<Head, Chain, Job, ()> {
+        let register_center = CronRegisterCenter::new(composer(&self));
         CronRegisterCenterBuilder::new(self, register_center)
     }
 
@@ -148,6 +267,39 @@ impl<Head, Chain> ServiceBuilder<Head, Chain> {
         super::iggy_consumer::IggyConsumerRegisterCenterBuilder::new(self, register_center)
     }
 
+    /// Build an Iggy event handler by a closure and start a handler list.
+    ///
+    /// `composer` borrows the builder, so it can [`provide`](Self::provide)
+    /// as many registered services as it needs, or ignore it and move in a
+    /// handler built by hand. It returns the handler in the [`Arc`] the
+    /// handler list stores, so an `Arc` shared elsewhere can be registered as
+    /// is. The handler needs no [`ServiceCreation`] impl and is not registered
+    /// as a service. It becomes the first entry of a new
+    /// [`IggyConsumerRegisterCenter`](wakuwaku_iggy::IggyConsumerRegisterCenter);
+    /// chain more handlers on the returned builder, then call `start` or
+    /// `into_parts`.
+    ///
+    /// `Handler` and `Event` are inferred from the returned handler when it
+    /// implements [`EventHandler`](wakuwaku_iggy::EventHandler) for only one
+    /// event; otherwise name the event, e.g.
+    /// `.compose_iggy_consumer::<_, MyEvent>(…)`. See the
+    /// [`iggy_consumer` module documentation](super::iggy_consumer) for an
+    /// example.
+    ///
+    /// [`Arc`]: std::sync::Arc
+    #[cfg(feature = "iggy")]
+    pub fn compose_iggy_consumer<Handler, Event>(
+        self,
+        composer: impl FnOnce(&Self) -> std::sync::Arc<Handler>,
+    ) -> super::iggy_consumer::IggyConsumerRegisterCenterBuilder<Head, Chain, Handler, Event, ()>
+    where
+        Handler: wakuwaku_iggy::EventHandler<Event>,
+        Event: wakuwaku_iggy::Event,
+    {
+        let register_center = wakuwaku_iggy::IggyConsumerRegisterCenter::new(composer(&self));
+        super::iggy_consumer::IggyConsumerRegisterCenterBuilder::new(self, register_center)
+    }
+
     /// Create a gRPC service implementation from a registered dependency,
     /// wrap it into its server, and start a server list.
     ///
@@ -163,8 +315,8 @@ impl<Head, Chain> ServiceBuilder<Head, Chain> {
     /// Write a generated server type as `XxxServer<_>`; its type parameter is
     /// inferred from `ServiceImpl`. The position is inferred with `_` when the
     /// dependency's type is registered exactly once. See the
-    /// [`grpc_service` module documentation](super::grpc_service#building-servers-from-a-servicebuilder)
-    /// for an example.
+    /// [`grpc_service` module documentation](super::grpc_service) for an
+    /// example.
     #[cfg(feature = "grpc")]
     pub fn grpc_service<Server, ServiceImpl, Position>(
         self,
@@ -179,6 +331,32 @@ impl<Head, Chain> ServiceBuilder<Head, Chain> {
         let service_dep = self.provide::<ServiceImpl::Dep, Position>().clone();
         let server = into_server(ServiceImpl::create_service(service_dep));
         let register_center = super::grpc_service::GrpcServiceRegisterCenter::new(server);
+        super::grpc_service::GrpcServiceRegisterCenterBuilder::new(self, register_center)
+    }
+
+    /// Build a gRPC server by a closure and start a server list.
+    ///
+    /// `composer` borrows the builder, so it can [`provide`](Self::provide)
+    /// as many registered services as it needs, or ignore it and move in a
+    /// server assembled by hand. It returns the finished server (for
+    /// tonic-generated servers, `XxxServer::new(implementation)`), whose type
+    /// is inferred. The implementation needs no [`ServiceCreation`] impl, is
+    /// not registered as a service, and is not cloned. The server becomes the
+    /// first entry of a new
+    /// [`GrpcServiceRegisterCenter`](super::grpc_service::GrpcServiceRegisterCenter);
+    /// chain more servers on the returned builder, then call
+    /// `into_router_fn` or `into_parts`. See the
+    /// [`grpc_service` module documentation](super::grpc_service) for an
+    /// example.
+    #[cfg(feature = "grpc")]
+    pub fn compose_grpc_service<Server>(
+        self,
+        composer: impl FnOnce(&Self) -> Server,
+    ) -> super::grpc_service::GrpcServiceRegisterCenterBuilder<Head, Chain, Server, ()>
+    where
+        Server: super::grpc_service::RoutableService,
+    {
+        let register_center = super::grpc_service::GrpcServiceRegisterCenter::new(composer(&self));
         super::grpc_service::GrpcServiceRegisterCenterBuilder::new(self, register_center)
     }
 }

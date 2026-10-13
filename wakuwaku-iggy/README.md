@@ -21,15 +21,18 @@ retry topic without blocking the others.
 
 ```toml
 [dependencies]
-wakuwaku-iggy = "0.1"
+wakuwaku-iggy = "0.2"
 ```
 
 1. Implement `PartitionKey` for the key type and `Event` for each event type.
-2. Publish with `Publisher::publish`.
+2. Publish with `Publisher::publish`, or `Publisher::publish_batch` for many
+   events of one type.
 3. Implement `EventHandler` for each event type, register the handlers with
    `IggyConsumerRegisterCenter`, and `start` it with a `ConsumerConfig`.
 
-See the crate documentation for the full model and an end-to-end example.
+See the [events guide](https://www.wakuwaku.rs/en/docs/events) for the model and
+worked examples, and the [API reference](https://docs.rs/wakuwaku-iggy) for
+every item. Within wakuwaku, enable the `iggy` feature and use `wakuwaku::iggy`.
 
 ## License
 

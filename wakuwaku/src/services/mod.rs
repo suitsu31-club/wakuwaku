@@ -1,15 +1,18 @@
 //! Building a service's components from shared dependencies.
 //!
 //! [`ServiceBuilder`](builder::ServiceBuilder) holds the shared
-//! dependencies, and every component that implements [`ServiceCreation`] is
-//! built from one of them. Each kind of component has its own register
-//! center, a type-level list filled straight from the service builder:
+//! dependencies. Each kind of component has a register center, a type-level
+//! list filled from the service builder either from one registered
+//! dependency through [`ServiceCreation`], or by a `compose_*` closure that
+//! borrows the service builder.
 //!
 //! | Component     | Trait                          | Module            | Feature |
 //! |---------------|--------------------------------|-------------------|---------|
 //! | Cron job      | [`CronJob`](cron_job::CronJob) | [`cron_job`]      |         |
 //! | gRPC server   | `grpc_service::RoutableService`| `grpc_service`    | `grpc`  |
 //! | Event handler | `wakuwaku_iggy::EventHandler`  | `iggy_consumer`   | `iggy`  |
+//!
+//! See the [service builder guide](https://www.wakuwaku.rs/en/docs/core/service-builder).
 
 pub mod builder;
 pub mod cron_job;
@@ -23,14 +26,13 @@ pub mod iggy_consumer;
 /// A component that can be constructed from a single dependency.
 ///
 /// [`ServiceBuilder::cron_job`](builder::ServiceBuilder::cron_job),
-/// `ServiceBuilder::grpc_service` (feature `grpc`) and
-/// `ServiceBuilder::iggy_consumer` (feature `iggy`) use it to create
-/// components from services already registered in a
-/// [`ServiceBuilder`](builder::ServiceBuilder).
-///
-/// The dependency is looked up by its type. If a component needs several
-/// dependencies, register a struct (or tuple) that holds them all and use
-/// that as `Dep`.
+/// [`construct_subservice`](builder::ServiceBuilder::construct_subservice),
+/// `grpc_service` (feature `grpc`) and `iggy_consumer` (feature `iggy`) look
+/// [`Dep`](Self::Dep) up by its type in a
+/// [`ServiceBuilder`](builder::ServiceBuilder), clone it, and pass the clone
+/// to [`create_service`](Self::create_service). Components that need several
+/// dependencies are registered with the `compose_*` methods instead, which
+/// need no `ServiceCreation` impl.
 pub trait ServiceCreation {
     /// The registered service this one is built from. It is cloned out of
     /// the builder, so it should be cheap to clone (a handle, `Arc`, or

@@ -1,16 +1,10 @@
 //! Durable bodies with a linear history of diffs, followed as they change.
 //!
-//! A live view holds a body `B` at a version, starting at 1. Each
-//! [commit](LiveView::commit) names the version it builds on and moves the
-//! view to the next one, so writers that race see a conflict instead of
-//! overwriting each other. The view keeps the latest body, read in O(1),
-//! and its history: a base body followed by the diffs that lead to the
-//! latest one. Once the history holds more diffs than the view's bound, the
-//! next commit makes the latest body the new base and drops the diffs.
-//!
-//! Subscribers follow the view as [events](LiveViewEvent): a diff per
-//! commit, or the whole body when the diffs they missed were squashed into
-//! a new base.
+//! A [`LiveView`] holds a body at a version, starting at 1. Each
+//! [commit](LiveView::commit) names the version it builds on, so racing
+//! writers see a [conflict](Commit::Conflict). Subscribers follow the view
+//! as [events](LiveViewEvent). See the
+//! [live views guide](https://www.wakuwaku.rs/en/docs/data/redis/live-view).
 //!
 //! ```no_run
 //! use futures_util::StreamExt;
@@ -90,7 +84,7 @@ use crate::redis::{Name, RedisSource, corrupted, deserialize_error, serialize_er
 use futures_util::Stream;
 use kanau::message::{MessageDe, MessageSer};
 use redis::aio::ConnectionLike;
-use redis::{RedisResult, Script};
+use redis::{RedisError, RedisResult, Script};
 use std::fmt::{self, Debug, Formatter};
 use std::marker::PhantomData;
 use std::sync::LazyLock;
@@ -159,18 +153,14 @@ return {2, tonumber(version)}
 
 /// Durable bodies `B` with a linear history of diffs, named by `N`.
 ///
-/// Each name is two keys in one cluster hash slot: a hash holding the
-/// latest version and body (the head), and a Redis stream holding the
-/// history. The history starts with a base entry, the body at its
-/// version, followed by one entry per later version holding its diff. Each
-/// entry has the ID `<version>-0`. A base made by squashing also holds the
-/// diff from the previous version, so subscribers that are up to date keep
-/// receiving diffs.
+/// The latest version reads in O(1). Once the history holds
+/// [`max_diffs`](Self::max_diffs) diffs, the next commit squashes it into
+/// a new base; subscribers that were further behind then receive a
+/// [snapshot](LiveViewEvent::Snapshot).
 ///
 /// Live views don't expire. Removing one doesn't notify its subscribers,
 /// which keep waiting; recreating it restarts the versions at 1, which
-/// subscribers past version 1 don't see. Use a new name instead of
-/// recreating a view.
+/// subscribers past version 1 don't see.
 pub struct LiveView<N: ?Sized, B> {
     namespace: &'static str,
     max_diffs: usize,
@@ -448,6 +438,7 @@ where
     C: ConnectionLike + Clone + Send + Sync,
 {
     type Output = bool;
+    type Error = RedisError;
 
     async fn execute(self, conn: &mut C) -> RedisResult<bool> {
         let body = self.body.to_bytes().map_err(serialize_error)?;
@@ -498,6 +489,7 @@ where
     C: ConnectionLike + Clone + Send + Sync,
 {
     type Output = Option<Versioned<B>>;
+    type Error = RedisError;
 
     async fn execute(self, conn: &mut C) -> RedisResult<Option<Versioned<B>>> {
         read_head(&self.head, conn).await
@@ -520,6 +512,7 @@ where
     C: ConnectionLike + Clone + Send + Sync,
 {
     type Output = Option<u64>;
+    type Error = RedisError;
 
     async fn execute(self, conn: &mut C) -> RedisResult<Option<u64>> {
         redis::cmd("HGET")
@@ -548,6 +541,7 @@ where
     C: ConnectionLike + Clone + Send + Sync,
 {
     type Output = Option<History<B>>;
+    type Error = RedisError;
 
     async fn execute(self, conn: &mut C) -> RedisResult<Option<History<B>>> {
         let reply = redis::cmd("XRANGE")
@@ -613,6 +607,7 @@ where
     C: ConnectionLike + Clone + Send + Sync,
 {
     type Output = Commit;
+    type Error = RedisError;
 
     async fn execute(self, conn: &mut C) -> RedisResult<Commit> {
         let diff = self.diff.to_bytes().map_err(serialize_error)?;
@@ -655,6 +650,7 @@ where
     D: ConnectionLike + Send,
 {
     type Output = Option<(Versioned<B>, LiveViewSubscription<B, D>)>;
+    type Error = RedisError;
 
     async fn execute(self, conn: &mut C) -> RedisResult<Self::Output> {
         let Some(latest) = read_head::<B>(&self.head, conn).await? else {
@@ -685,6 +681,7 @@ where
     D: ConnectionLike + Send,
 {
     type Output = LiveViewSubscription<B, D>;
+    type Error = RedisError;
 
     async fn execute(self, _: &mut C) -> RedisResult<LiveViewSubscription<B, D>> {
         Ok(LiveViewSubscription::new(self.conn, self.log, self.version))
@@ -774,6 +771,7 @@ where
     C: ConnectionLike + Clone + Send + Sync,
 {
     type Output = bool;
+    type Error = RedisError;
 
     async fn execute(self, conn: &mut C) -> RedisResult<bool> {
         let removed: u64 = redis::cmd("UNLINK")

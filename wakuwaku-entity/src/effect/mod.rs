@@ -8,6 +8,8 @@
 //!   effect sets, and [`Covers`](io::Covers), which checks a capability
 //!   against an effect.
 //! - [`hook`]: processors that run before or after write queries.
+//!
+//! See the [data access guide](https://www.wakuwaku.rs/en/docs/data).
 
 pub mod hook;
 pub mod io;

@@ -1,10 +1,9 @@
 //! Append-only arrays of bodies, followed as they grow.
 //!
-//! A stream buffer holds the bodies appended to it, in order, until its
-//! producer finishes it. Any number of subscribers can read it from any
-//! index and follow the new bodies, so a client that reconnects resumes
-//! where it stopped. It suits streamed output such as the chunks of an LLM
-//! response.
+//! A [`StreamBuffer`] holds the bodies appended to it, in order, until its
+//! producer finishes it. Any number of subscribers read it from any index.
+//! See the
+//! [stream buffers guide](https://www.wakuwaku.rs/en/docs/data/redis/stream-buffer).
 //!
 //! ```no_run
 //! use std::time::Duration;
@@ -60,7 +59,7 @@ use crate::redis::{
 use futures_util::Stream;
 use kanau::message::{MessageDe, MessageSer};
 use redis::aio::ConnectionLike;
-use redis::{RedisResult, Script};
+use redis::{RedisError, RedisResult, Script};
 use std::fmt::{self, Debug, Formatter};
 use std::marker::PhantomData;
 use std::sync::LazyLock;
@@ -105,10 +104,6 @@ return 1
 });
 
 /// Append-only arrays of bodies `B`, named by `N`.
-///
-/// Each name is one Redis stream. The body at index `i` is the entry
-/// `0-(i + 1)`, and a finished buffer ends with one more entry marking the
-/// end.
 ///
 /// Every append and the finish restart the TTL, so a buffer lives one TTL
 /// after its last change, finished or not. A subscriber that gets nothing
@@ -270,6 +265,7 @@ where
     C: ConnectionLike + Clone + Send + Sync,
 {
     type Output = Option<u64>;
+    type Error = RedisError;
 
     async fn execute(self, conn: &mut C) -> RedisResult<Option<u64>> {
         let body = self.body.to_bytes().map_err(serialize_error)?;
@@ -300,6 +296,7 @@ where
     C: ConnectionLike + Clone + Send + Sync,
 {
     type Output = bool;
+    type Error = RedisError;
 
     async fn execute(self, conn: &mut C) -> RedisResult<bool> {
         FINISH
@@ -337,6 +334,7 @@ where
     C: ConnectionLike + Clone + Send + Sync,
 {
     type Output = Contents<B>;
+    type Error = RedisError;
 
     async fn execute(self, conn: &mut C) -> RedisResult<Contents<B>> {
         let reply = redis::cmd("XRANGE")
@@ -387,6 +385,7 @@ where
     D: ConnectionLike + Send,
 {
     type Output = StreamBufferSubscription<B, D>;
+    type Error = RedisError;
 
     async fn execute(self, _: &mut C) -> RedisResult<StreamBufferSubscription<B, D>> {
         Ok(StreamBufferSubscription {
@@ -476,6 +475,7 @@ where
     C: ConnectionLike + Clone + Send + Sync,
 {
     type Output = bool;
+    type Error = RedisError;
 
     async fn execute(self, conn: &mut C) -> RedisResult<bool> {
         redis::cmd("UNLINK").arg(&self.key).query_async(conn).await

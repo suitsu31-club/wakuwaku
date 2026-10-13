@@ -4,7 +4,8 @@
 //! - [`HashedCache`] also stores the BLAKE3 hash of each body, so a reader
 //!   that already holds a copy can check it without downloading the body.
 //!
-//! Bodies are any [`MessageSer`] / [`MessageDe`] type.
+//! Bodies are any [`MessageSer`] / [`MessageDe`] type. See the
+//! [caches guide](https://www.wakuwaku.rs/en/docs/data/redis/cache).
 //!
 //! ```no_run
 //! use std::time::Duration;
@@ -43,7 +44,7 @@ use crate::redis::{Name, corrupted, deserialize_error, item_key, millis, seriali
 pub use blake3::Hash;
 use kanau::message::{MessageDe, MessageSer};
 use redis::aio::ConnectionLike;
-use redis::{RedisResult, Script};
+use redis::{RedisError, RedisResult, Script};
 use std::fmt::{self, Debug, Formatter};
 use std::marker::PhantomData;
 use std::sync::LazyLock;
@@ -159,6 +160,7 @@ where
     C: ConnectionLike + Clone + Send + Sync,
 {
     type Output = Option<B>;
+    type Error = RedisError;
 
     async fn execute(self, conn: &mut C) -> RedisResult<Option<B>> {
         let bytes: Option<Vec<u8>> = redis::cmd("GET").arg(&self.key).query_async(conn).await?;
@@ -187,6 +189,7 @@ where
     C: ConnectionLike + Clone + Send + Sync,
 {
     type Output = ();
+    type Error = RedisError;
 
     async fn execute(self, conn: &mut C) -> RedisResult<()> {
         let body = self.body.to_bytes().map_err(serialize_error)?;
@@ -216,6 +219,7 @@ where
     C: ConnectionLike + Clone + Send + Sync,
 {
     type Output = bool;
+    type Error = RedisError;
 
     async fn execute(self, conn: &mut C) -> RedisResult<bool> {
         unlink(&self.key, conn).await
@@ -223,10 +227,8 @@ where
 }
 
 /// Like [`Cache`], but each item also holds the BLAKE3 hash of its
-/// serialized body.
-///
-/// An item is a Redis hash with the fields `body` and `hash`, written
-/// together. [`hash`](Self::hash) and [`get_if_changed`](Self::get_if_changed)
+/// serialized body, written together with it.
+/// [`hash`](Self::hash) and [`get_if_changed`](Self::get_if_changed)
 /// compare a copy against the stored body by transferring the 32-byte hash
 /// only.
 pub struct HashedCache<N: ?Sized, B> {
@@ -350,6 +352,7 @@ where
     C: ConnectionLike + Clone + Send + Sync,
 {
     type Output = Option<Hashed<B>>;
+    type Error = RedisError;
 
     async fn execute(self, conn: &mut C) -> RedisResult<Option<Hashed<B>>> {
         let fields: (Option<Vec<u8>>, Option<Vec<u8>>) = redis::cmd("HMGET")
@@ -382,6 +385,7 @@ where
     C: ConnectionLike + Clone + Send + Sync,
 {
     type Output = Option<Hash>;
+    type Error = RedisError;
 
     async fn execute(self, conn: &mut C) -> RedisResult<Option<Hash>> {
         let hash: Option<Vec<u8>> = redis::cmd("HGET")
@@ -411,6 +415,7 @@ where
     C: ConnectionLike + Clone + Send + Sync,
 {
     type Output = Freshness<B>;
+    type Error = RedisError;
 
     async fn execute(self, conn: &mut C) -> RedisResult<Freshness<B>> {
         let reply: Vec<redis::Value> = GET_IF_CHANGED
@@ -450,6 +455,7 @@ where
     C: ConnectionLike + Clone + Send + Sync,
 {
     type Output = Hash;
+    type Error = RedisError;
 
     async fn execute(self, conn: &mut C) -> RedisResult<Hash> {
         let body = self.body.to_bytes().map_err(serialize_error)?;
@@ -489,6 +495,7 @@ where
     C: ConnectionLike + Clone + Send + Sync,
 {
     type Output = bool;
+    type Error = RedisError;
 
     async fn execute(self, conn: &mut C) -> RedisResult<bool> {
         unlink(&self.key, conn).await

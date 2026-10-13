@@ -1,8 +1,7 @@
 //! Per-key planning of a polled batch.
 //!
-//! An Iggy partition gives a total order, but the business only needs an
-//! order per key. [`Plan::new`] turns one polled batch into the weaker order
-//! the events actually require, so the consumer can batch and reduce them:
+//! [`Plan::new`] turns one polled batch into the weaker order its events
+//! actually require:
 //!
 //! - **Keys** are independent. They may be processed in any order or
 //!   concurrently.
@@ -23,12 +22,10 @@
 //!   `Release` event gets a segment of its own instead, because one run can't
 //!   be both first and last.
 //!
-//! This is stronger than the fences require (`Acquire` doesn't actually forbid
-//! earlier events from moving past it), but every segment is then totally
-//! ordered against its neighbours, which keeps execution simple.
-//!
 //! The planner is pure: it only reads the key, type tag and ordering of each
 //! record, taken from message headers, and returns indices into its input.
+//!
+//! See the [ordering guide](https://www.wakuwaku.rs/en/docs/events/ordering).
 
 use crate::events::{EventAtomicOrdering, EventTypeTag};
 use std::collections::HashMap;

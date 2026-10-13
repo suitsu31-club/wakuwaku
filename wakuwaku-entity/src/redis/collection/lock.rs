@@ -4,16 +4,10 @@
 //! - [`RwLock`]: either one writer or any number of readers per name.
 //!
 //! Acquiring never waits: the query outputs a token if the lock was free
-//! and `None` otherwise, and the caller decides how to retry. A holder
-//! keeps the lock until it releases it or the lease (the lock's TTL)
-//! runs out; extend the lease to hold it longer. A holder whose lease ran
-//! out may have been overtaken, which [`LockToken::release`] and
-//! [`LockToken::extend`] report by outputting `false`.
-//!
-//! The lease is what keeps a crashed holder from blocking everyone, so it
-//! also bounds what the lock protects: work that may outlive the lease must
-//! extend it, and a stalled process may resume after losing the lock.
-//! Pass a fencing value to the protected resource when that matters.
+//! and `None` otherwise. A holder keeps the lock until it releases it or
+//! the lease (the lock's TTL) runs out. See the
+//! [locks guide](https://www.wakuwaku.rs/en/docs/data/redis/lock) for what a
+//! lease can and can't guarantee.
 //!
 //! ```no_run
 //! use std::time::Duration;
@@ -41,7 +35,7 @@ use crate::query::{Execute, Query};
 use crate::redis::RedisSource;
 use crate::redis::{Name, item_key, millis, tagged_pair};
 use redis::aio::ConnectionLike;
-use redis::{RedisResult, Script};
+use redis::{RedisError, RedisResult, Script};
 use std::fmt::{self, Debug, Formatter};
 use std::marker::PhantomData;
 use std::sync::LazyLock;
@@ -176,8 +170,6 @@ macro_rules! lock_collection {
 }
 
 /// A mutual exclusion lock per name `N`.
-///
-/// Each name is one string key holding the random token of its holder.
 pub struct Lock<N: ?Sized> {
     namespace: &'static str,
     ttl: Duration,
@@ -214,6 +206,7 @@ where
     C: ConnectionLike + Clone + Send + Sync,
 {
     type Output = Option<LockToken<Lock<N>>>;
+    type Error = RedisError;
 
     async fn execute(self, conn: &mut C) -> RedisResult<Self::Output> {
         let token = lock_token()?;
@@ -287,6 +280,7 @@ where
     C: ConnectionLike + Clone + Send + Sync,
 {
     type Output = bool;
+    type Error = RedisError;
 
     async fn execute(self, conn: &mut C) -> RedisResult<bool> {
         RELEASE
@@ -312,6 +306,7 @@ where
     C: ConnectionLike + Clone + Send + Sync,
 {
     type Output = bool;
+    type Error = RedisError;
 
     async fn execute(self, conn: &mut C) -> RedisResult<bool> {
         EXTEND
@@ -325,10 +320,8 @@ where
 
 /// A reader-writer lock per name `N`.
 ///
-/// Each name is two keys in one cluster hash slot: a string key holding the
-/// token of the writer, and a sorted set of reader tokens scored by the end
-/// of their lease. Readers don't wait for a writer that is trying to
-/// acquire, so a steady stream of readers can starve writers.
+/// Readers don't wait for a writer that is trying to acquire, so a steady
+/// stream of readers can starve writers.
 pub struct RwLock<N: ?Sized> {
     namespace: &'static str,
     ttl: Duration,
@@ -385,6 +378,7 @@ where
     C: ConnectionLike + Clone + Send + Sync,
 {
     type Output = Option<ReadToken<N>>;
+    type Error = RedisError;
 
     async fn execute(self, conn: &mut C) -> RedisResult<Self::Output> {
         let token = lock_token()?;
@@ -422,6 +416,7 @@ where
     C: ConnectionLike + Clone + Send + Sync,
 {
     type Output = Option<LockToken<RwLock<N>>>;
+    type Error = RedisError;
 
     async fn execute(self, conn: &mut C) -> RedisResult<Self::Output> {
         let token = lock_token()?;
@@ -482,6 +477,7 @@ where
     C: ConnectionLike + Clone + Send + Sync,
 {
     type Output = bool;
+    type Error = RedisError;
 
     async fn execute(self, conn: &mut C) -> RedisResult<bool> {
         READ_RELEASE
@@ -507,6 +503,7 @@ where
     C: ConnectionLike + Clone + Send + Sync,
 {
     type Output = bool;
+    type Error = RedisError;
 
     async fn execute(self, conn: &mut C) -> RedisResult<bool> {
         READ_EXTEND

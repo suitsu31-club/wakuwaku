@@ -1,14 +1,11 @@
 //! Writing documents and settings, and waiting for the tasks they enqueue.
 //!
-//! Meilisearch applies writes asynchronously. Each write query outputs the
-//! [`TaskInfo`] of its enqueued task; [`WaitTask`] waits until the task
-//! ran and fails if the task failed. Tasks of one index run in the order
+//! Meilisearch applies writes asynchronously: [`Upsert`], [`Delete`] and
+//! [`ApplySettings`] output the [`TaskInfo`] of their enqueued task, and
+//! [`WaitTask`] waits until it ran. Tasks of one index run in the order
 //! they were enqueued.
 //!
-//! Write queries have the effect `Write<I>` and can be hooked like any
-//! other write, but an index is a projection of another data source:
-//! hook the writes to that source instead, and update the index from there
-//! (see [`sync`](super::sync)).
+//! See the [writes guide](https://www.wakuwaku.rs/en/docs/data/meilisearch/writes).
 
 use crate::effect::io::Write;
 use crate::meilisearch::{MeiliSource, SearchIndex, effective_settings};
@@ -55,6 +52,7 @@ impl<I: SearchIndex> Query for Upsert<I> {
 
 impl<I: SearchIndex> Execute<MeiliSource> for Upsert<I> {
     type Output = TaskInfo;
+    type Error = Error;
 
     async fn execute(self, client: &mut Arc<Client>) -> Result<TaskInfo, Error> {
         upsert::<I>(client, I::UID, &self.documents).await
@@ -107,6 +105,7 @@ impl<I: SearchIndex> Query for Delete<I> {
 
 impl<I: SearchIndex> Execute<MeiliSource> for Delete<I> {
     type Output = TaskInfo;
+    type Error = Error;
 
     async fn execute(self, client: &mut Arc<Client>) -> Result<TaskInfo, Error> {
         client.index(I::UID).delete_documents(&self.keys).await
@@ -151,6 +150,7 @@ impl<I: SearchIndex> Query for ApplySettings<I> {
 
 impl<I: SearchIndex> Execute<MeiliSource> for ApplySettings<I> {
     type Output = TaskInfo;
+    type Error = Error;
 
     async fn execute(self, client: &mut Arc<Client>) -> Result<TaskInfo, Error> {
         apply_settings::<I>(client, I::UID).await
@@ -200,6 +200,7 @@ impl Query for WaitTask {
 
 impl Execute<MeiliSource> for WaitTask {
     type Output = ();
+    type Error = Error;
 
     async fn execute(self, client: &mut Arc<Client>) -> Result<(), Error> {
         wait(client, &self.task, self.timeout, None).await

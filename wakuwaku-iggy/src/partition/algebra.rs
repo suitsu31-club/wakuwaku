@@ -25,6 +25,8 @@
 //! Once a run folds into a single event, idempotency and commutativity cannot
 //! shrink it further, so [`Associative`] has no idempotent or commutative
 //! variant.
+//!
+//! See the [algebra guide](https://www.wakuwaku.rs/en/docs/events/algebra).
 
 use crate::events::EventAssociativity;
 

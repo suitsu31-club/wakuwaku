@@ -1,6 +1,6 @@
 [package]
 name = "wakuwaku"
-version = "1.0.0-rc1"
+version = "1.0.0-rc2"
 edition.workspace = true
 description = "Proof-driven microservice framework: type-level service builder, gRPC registration, cron jobs, and the wakuwaku crates in one dependency"
 license.workspace = true
@@ -11,15 +11,20 @@ documentation = "https://docs.rs/wakuwaku"
 keywords = ["microservice", "framework", "grpc", "iggy", "cron"]
 
 [dependencies]
+# Base
 kanau.workspace = true
 tokio.workspace = true
 tracing = "0.1"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
+
+# Wakuwaku Components
+wakuwaku-proof = { version = "0.2", path = "../wakuwaku-proof", optional = true }
+wakuwaku-iggy = { version = "0.2", path = "../wakuwaku-iggy", optional = true }
+wakuwaku-entity = { version = "0.2", path = "../wakuwaku-entity", default-features = false, optional = true }
+
+# Optional features
 tonic = { version = "0.14", optional = true }
-wakuwaku-proof = { version = "0.1", path = "../wakuwaku-proof", optional = true }
-wakuwaku-iggy = { version = "0.1", path = "../wakuwaku-iggy", optional = true }
 iggy = { version = "0.11", optional = true }
-wakuwaku-entity = { version = "0.1", path = "../wakuwaku-entity", default-features = false, optional = true }
 sqlx = { version = "0.9", default-features = false, optional = true }
 redis = { version = "1.0", default-features = false, optional = true }
 meilisearch-sdk = { version = "0.33", default-features = false, optional = true }

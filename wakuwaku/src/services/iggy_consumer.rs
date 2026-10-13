@@ -1,25 +1,19 @@
 //! Building Iggy event handlers from a [`ServiceBuilder`].
 //!
-//! Event handlers usually need shared dependencies such as a database pool
-//! or an HTTP client. Implement [`ServiceCreation`] for the handler and let
-//! [`ServiceBuilder::iggy_consumer`] build it from a dependency that is
-//! already registered in the service builder. That call returns an
-//! [`IggyConsumerRegisterCenterBuilder`], which chains more
-//! [`iggy_consumer`](IggyConsumerRegisterCenterBuilder::iggy_consumer) calls
-//! and ends with either:
+//! - [`ServiceBuilder::iggy_consumer`] creates a handler that implements
+//!   [`ServiceCreation`] from one registered dependency.
+//! - [`ServiceBuilder::compose_iggy_consumer`] takes any handler, built by a
+//!   closure that borrows the service builder.
 //!
-//! - [`start`](IggyConsumerRegisterCenterBuilder::start), which starts
-//!   consuming and gives back the service builder together with the
-//!   [`ConsumerRuntime`], or
-//! - [`into_parts`](IggyConsumerRegisterCenterBuilder::into_parts), which
-//!   returns the service builder and the unstarted
-//!   [`IggyConsumerRegisterCenter`], so you can start it later or
-//!   [`push`](IggyConsumerRegisterCenter::push) handlers built by hand.
+//! Both return an [`IggyConsumerRegisterCenterBuilder`], which chains more of
+//! either in any order and ends with
+//! [`start`](IggyConsumerRegisterCenterBuilder::start) (returning the
+//! [`ConsumerRuntime`]) or
+//! [`into_parts`](IggyConsumerRegisterCenterBuilder::into_parts) (returning
+//! the unstarted [`IggyConsumerRegisterCenter`]). Each handler is created when
+//! it is registered.
 //!
-//! Each handler is created right away, when `iggy_consumer` is called. Its
-//! [`Dep`](ServiceCreation::Dep) is cloned out of the service builder and the
-//! handler is wrapped in an [`Arc`]. See the [`wakuwaku_iggy`] documentation
-//! for how events are consumed.
+//! See the [consuming guide](https://www.wakuwaku.rs/en/docs/events/consuming).
 //!
 //! # Example
 //!
@@ -108,15 +102,15 @@
 //!
 //!     let _mailer: &Mailer = services.provide::<Mailer, _>();
 //!     tokio::signal::ctrl_c().await?;
+//!     // Lets the batches in flight finish; `abort` would cancel them.
 //!     consumers.shutdown().await;
 //!     Ok(())
 //! }
 //! ```
 //!
-//! The event must be named when a handler handles more than one event, e.g.
-//! `.iggy_consumer::<MyHandler, MyEvent, _>()`. The position must be named
-//! with [`Here`](super::builder::Here) / [`There`](super::builder::There)
-//! when the dependency's type is registered more than once.
+//! A handler built from several services is registered with a closure
+//! instead, e.g. `.compose_iggy_consumer(|s| Arc::new(AuditLog { db:
+//! s.provide::<Db, _>().clone(), mailer: s.provide::<Mailer, _>().clone() }))`.
 
 use crate::services::ServiceCreation;
 use crate::services::builder::{ProvideAt, ServiceBuilder, ServiceBuilderPosition};
@@ -124,16 +118,19 @@ use iggy::prelude::IggyClient;
 use std::sync::Arc;
 use wakuwaku_iggy::consumer::handler::HandlerList;
 use wakuwaku_iggy::error::Error;
-use wakuwaku_iggy::{ConsumerConfig, ConsumerRuntime, Event, EventHandler, IggyConsumerRegisterCenter};
+use wakuwaku_iggy::{
+    ConsumerConfig, ConsumerRuntime, Event, EventHandler, IggyConsumerRegisterCenter,
+};
 
-/// Registers [`ServiceCreation`] event handlers built from a
-/// [`ServiceBuilder`].
+/// Registers Iggy event handlers built from a [`ServiceBuilder`].
 ///
 /// Pairs a service builder (`SHead`, `SChain`) with an
 /// [`IggyConsumerRegisterCenter`] (`Handler`, `Ev`, `IChain`) that is being
-/// filled from it. Get one from [`ServiceBuilder::iggy_consumer`], register
-/// more handlers with [`iggy_consumer`](Self::iggy_consumer), then finish
-/// with [`start`](Self::start) or [`into_parts`](Self::into_parts). See the
+/// filled from it. Get one from [`ServiceBuilder::iggy_consumer`] or
+/// [`ServiceBuilder::compose_iggy_consumer`], register more handlers with
+/// [`iggy_consumer`](Self::iggy_consumer) or
+/// [`compose_iggy_consumer`](Self::compose_iggy_consumer), then finish with
+/// [`start`](Self::start) or [`into_parts`](Self::into_parts). See the
 /// [module documentation](self) for an example.
 pub struct IggyConsumerRegisterCenterBuilder<SHead, SChain, Handler, Ev, IChain>
 where
@@ -200,13 +197,41 @@ where
         }
     }
 
-    /// Split into the service builder and the unstarted handler list.
-    pub fn into_parts(
+    /// Build `NewHandler` from any registered services and register it.
+    ///
+    /// `composer` borrows [`builder`](Self::builder), so it can
+    /// [`provide`](ServiceBuilder::provide) as many registered services as it
+    /// needs, or ignore it and move in a handler that was built by hand. It
+    /// returns the handler in the [`Arc`] the list stores. The handler needs
+    /// no [`ServiceCreation`] impl and is pushed onto the list the same way as
+    /// [`IggyConsumerRegisterCenter::push`].
+    ///
+    /// `NewHandler` and `NewEvent` are inferred from the returned handler
+    /// when it implements [`EventHandler`] for only one event; otherwise name
+    /// the event, e.g. `.compose_iggy_consumer::<_, MyEvent>(…)`.
+    pub fn compose_iggy_consumer<NewHandler, NewEvent>(
         self,
-    ) -> (
-        ServiceBuilder<SH, SC>,
+        composer: impl FnOnce(&ServiceBuilder<SH, SC>) -> Arc<NewHandler>,
+    ) -> IggyConsumerRegisterCenterBuilder<
+        SH,
+        SC,
+        NewHandler,
+        NewEvent,
         IggyConsumerRegisterCenter<H, E, IC>,
-    ) {
+    >
+    where
+        NewHandler: EventHandler<NewEvent>,
+        NewEvent: Event,
+    {
+        let handler = composer(&self.builder);
+        IggyConsumerRegisterCenterBuilder {
+            builder: self.builder,
+            register_center: self.register_center.push(handler),
+        }
+    }
+
+    /// Split into the service builder and the unstarted handler list.
+    pub fn into_parts(self) -> (ServiceBuilder<SH, SC>, IggyConsumerRegisterCenter<H, E, IC>) {
         (self.builder, self.register_center)
     }
 }

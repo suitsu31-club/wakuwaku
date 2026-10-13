@@ -1,119 +1,99 @@
 //! Transactions on sqlx sources.
 //!
-//! Write the transaction as a [`TxFlow`] (see [`flow`]), wrap it in a
+//! Write the transaction as a [`TxFlow`], wrap its first state in a
 //! [`Transaction`], and process it with a [`Db`] whose capability covers the
-//! flow's effect:
+//! flow's effect. The result is a [`TxOutput`] or a [`TxError`]; to act on
+//! how the transaction ended, wrap the handle in an
+//! [`AfterTransaction`](hook::AfterTransaction).
 //!
 //! ```no_run
 //! use kanau::processor::Processor;
 //! use sqlx::{PgConnection, PgPool, Postgres};
 //! use wakuwaku_entity::sqlx::backend::{PgSource, SqlxSource};
-//! use wakuwaku_entity::sqlx::transaction::{Step, Transaction, TxFlow, TxOutput};
-//! use wakuwaku_entity::{Db, Entity, Execute, Query, Read, ReadWrite, Write};
+//! use wakuwaku_entity::sqlx::transaction::{Either, Transaction, Tx, TxEnd, TxFlow, TxState};
+//! use wakuwaku_entity::{Db, Entity, Execute, Query, ReadWrite, Write};
 //!
 //! struct Account;
 //! impl Entity for Account {}
 //!
-//! /// The queries of the transfer, and what they return.
-//! enum TransferQuery {
-//!     Debit { from: i64, amount: i64 },
-//!     Credit { to: i64, amount: i64 },
+//! /// Adds `amount` to `to`. Rows affected.
+//! struct Credit { to: i64, amount: i64 }
+//! impl Query for Credit {
+//!     type Effect = Write<Account>;
 //! }
-//!
-//! impl Query for TransferQuery {
-//!     type Effect = (Read<Account>, Write<Account>);
-//! }
-//!
-//! impl Execute<SqlxSource<Postgres>> for TransferQuery {
-//!     /// Rows affected.
+//! impl Execute<SqlxSource<Postgres>> for Credit {
 //!     type Output = u64;
+//!     type Error = sqlx::Error;
 //!     async fn execute(self, conn: &mut PgConnection) -> Result<u64, sqlx::Error> {
-//!         let done = match self {
-//!             TransferQuery::Debit { from, amount } => {
-//!                 sqlx::query("UPDATE account SET balance = balance - $2 WHERE id = $1 AND balance >= $2")
-//!                     .bind(from)
-//!                     .bind(amount)
-//!                     .execute(conn)
-//!                     .await?
-//!             }
-//!             TransferQuery::Credit { to, amount } => {
-//!                 sqlx::query("UPDATE account SET balance = balance + $2 WHERE id = $1")
-//!                     .bind(to)
-//!                     .bind(amount)
-//!                     .execute(conn)
-//!                     .await?
-//!             }
-//!         };
+//!         let done = sqlx::query("UPDATE account SET balance = balance + $2 WHERE id = $1")
+//!             .bind(self.to)
+//!             .bind(self.amount)
+//!             .execute(conn)
+//!             .await?;
 //!         Ok(done.rows_affected())
 //!     }
 //! }
 //!
-//! /// Debit, then credit. Each state is what the flow waits for.
-//! enum Transfer {
-//!     Start { from: i64, to: i64, amount: i64 },
-//!     Debited { to: i64, amount: i64 },
-//!     Credited { amount: i64 },
+//! enum Bonus {
+//!     Start { to: i64 },
+//!     End(TxEnd<Bonus>),
 //! }
-//!
-//! impl TxFlow for Transfer {
+//! impl Query for Bonus {
+//!     type Effect = Write<Account>;
+//! }
+//! impl From<TxEnd<Bonus>> for Bonus {
+//!     fn from(end: TxEnd<Bonus>) -> Self {
+//!         Bonus::End(end)
+//!     }
+//! }
+//! impl TxFlow for Bonus {
 //!     type Database = Postgres;
-//!     type Query = TransferQuery;
 //!     type Commit = ();
-//!     type Abort = &'static str;
-//!     /// Event to publish once the transaction ended.
-//!     type Report = Option<i64>;
+//!     type Abort = ();
+//!     type Report = ();
 //!
-//!     fn start(self) -> Step<Self> {
-//!         let Transfer::Start { from, to, amount } = self else { unreachable!() };
-//!         Step::Run {
-//!             next: Transfer::Debited { to, amount },
-//!             query: TransferQuery::Debit { from, amount },
-//!         }
+//!     async fn step(tx: Tx<'_, Self>, state: Self) -> TxState<'_, Self> {
+//!         let Bonus::Start { to } = state else { unreachable!("never stepped when terminal") };
+//!         let (tx, credited) = tx.run(Credit { to, amount: 10 }).await;
+//!         tx.with(Bonus::End(match credited {
+//!             Ok(1) => TxEnd::Commit { output: (), report: () },
+//!             _ => TxEnd::Rollback { output: (), report: () },
+//!         }))
 //!     }
 //!
-//!     fn resume(self, rows: Result<u64, sqlx::Error>) -> Step<Self> {
-//!         match (self, rows) {
-//!             (Transfer::Debited { to, amount }, Ok(1)) => Step::Run {
-//!                 next: Transfer::Credited { amount },
-//!                 query: TransferQuery::Credit { to, amount },
-//!             },
-//!             (Transfer::Credited { amount }, Ok(1)) => {
-//!                 Step::Commit { output: (), report: Some(amount) }
-//!             }
-//!             _ => Step::Rollback { output: "insufficient funds or no account", report: None },
+//!     fn finished(self) -> Either<Self, TxEnd<Self>> {
+//!         match self {
+//!             Bonus::End(end) => Either::Right(end),
+//!             state => Either::Left(state),
 //!         }
-//!     }
-//!
-//!     fn aborted(self, _: sqlx::Error) -> (&'static str, Option<i64>) {
-//!         ("aborted", None)
 //!     }
 //! }
 //!
 //! # async fn run(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
 //! let db: Db<PgSource, ReadWrite> = Db::new(SqlxSource::new(pool));
-//! let outcome = db.process(Transaction(Transfer::Start { from: 1, to: 2, amount: 10 })).await?;
-//! assert_eq!(outcome, TxOutput::Committed(()));
+//! let outcome = db.process(Transaction(Bonus::Start { to: 2 })).await?;
 //! # Ok(())
 //! # }
 //! ```
 //!
-//! To act on how the transaction ended (publish its events, invalidate a
-//! cache, …), wrap the handle in an [`AfterTransaction`](hook::AfterTransaction).
+//! See the [transactions guide](https://www.wakuwaku.rs/en/docs/data/transactions).
 
 pub mod flow;
 pub mod hook;
 
+pub use either::Either;
 pub use flow::{
-    FlowEffect, FlowOutput, IsolationLevel, Step, TxError, TxFinalState, TxFlow, TxMode, TxOutput,
+    AsSqlxError, IsolationLevel, Tx, TxEnd, TxError, TxFinalState, TxFlow, TxMode, TxOutput,
+    TxState,
 };
 
 use crate::effect::io::Covers;
-use crate::query::{Db, Execute};
+use crate::query::Db;
 use crate::sqlx::backend::{SqlxBackend, SqlxSource};
-use flow::{Begin, Done, TxMachine};
+use flow::Done;
 use kanau::processor::Processor;
 
-/// Run the flow `F` as one transaction.
+/// Run the flow `F`, starting from the state it holds, as one transaction.
 #[derive(Debug, Clone)]
 pub struct Transaction<F>(pub F);
 
@@ -121,7 +101,7 @@ impl<DB, C, F> Processor<Transaction<F>> for Db<SqlxSource<DB>, C>
 where
     DB: SqlxBackend,
     F: TxFlow<Database = DB>,
-    C: Covers<FlowEffect<F>>,
+    C: Covers<F::Effect>,
 {
     type Output = TxOutput<F::Commit, F::Abort>;
     type Error = TxError;
@@ -131,28 +111,26 @@ where
     }
 }
 
-/// Run `flow` on a connection from `source`, executing what its
-/// [`TxMachine`] asks for.
+/// Run `flow` on a connection from `source`: end it if its state is
+/// terminal, else step it, until it ends.
 pub(crate) async fn drive<F: TxFlow>(source: &SqlxSource<F::Database>, flow: F) -> Done<F> {
-    let begin = Begin::new(flow);
     let mut conn = match source.pool().acquire().await {
         Ok(conn) => conn,
-        Err(error) => return begin.failed(error),
+        Err(error) => return Done::not_begun(error),
     };
-    let mut tx = match F::Database::begin(&mut conn, begin.mode()).await {
+    let tx = match F::Database::begin(&mut conn, flow::mode::<F>()).await {
         Ok(tx) => tx,
-        Err(error) => return begin.failed(error),
+        Err(error) => return Done::not_begun(error),
     };
-    let mut machine = begin.begun();
+    let (mut tx, mut state) = (Tx::new(tx), flow);
     loop {
-        machine = match machine {
-            TxMachine::Run(running, query) => running.ran(query.execute(&mut tx).await),
-            TxMachine::Commit(committing) => return committing.committed(tx.commit().await),
-            TxMachine::Rollback(rolling_back) => {
-                // The outcome is the same either way; see `RollingBack::rolled_back`.
-                let _ = tx.rollback().await;
-                return rolling_back.rolled_back();
-            }
+        (tx, state) = match tx.end(state).await.into_open() {
+            Either::Left(open) => open,
+            Either::Right(done) => return done,
+        };
+        (tx, state) = match F::step(tx, state).await.into_open() {
+            Either::Left(open) => open,
+            Either::Right(done) => return done,
         };
     }
 }

@@ -6,25 +6,19 @@
 //! live in their own crates, re-exported here behind feature flags, so a
 //! service needs only this one dependency.
 //!
-//! # Proof-driven programming
-//!
-//! Correctness is split in two:
-//!
-//! - **Macro correctness**, how components fit together, is proven by
-//!   traits and checked by the compiler. A component whose dependency was
-//!   never registered, a query run through a handle that lacks the
-//!   capability, a cron job with no interval: none of these compile.
-//! - **Micro correctness**, what one component does, is proven by unit
-//!   tests. Every component is a plain value implementing
-//!   [`kanau::processor::Processor`] (or a trait built on it), so a test
-//!   calls it directly, without a running service.
+//! How components fit together is checked by the compiler; what each one
+//! does is checked by unit tests, since every component is a plain value
+//! implementing [`kanau::processor::Processor`] (or a trait built on it).
+//! See [proof-driven programming](https://www.wakuwaku.rs/en/docs/core/proof-driven)
+//! and the [guide](https://www.wakuwaku.rs/en/docs).
 //!
 //! # What this crate provides
 //!
 //! - [`services::builder`]: [`ServiceBuilder`], the type-indexed registry of
-//!   shared dependencies, and [`ServiceCreation`], how a component is built
-//!   from one of them.
-//! - [`services::cron_job`]: [`CronJob`]s, run locally at a fixed interval.
+//!   shared dependencies that every component is built from, either from one
+//!   dependency through [`ServiceCreation`] or by a `compose_*` closure.
+//! - [`services::cron_job`]: [`CronJob`]s, run locally on a
+//!   [`CronJobInterval`].
 //! - `services::grpc_service` (feature `grpc`): registering tonic servers
 //!   built from the service builder.
 //! - `services::iggy_consumer` (feature `iggy`): registering Iggy event
@@ -59,12 +53,15 @@
     clippy::arithmetic_side_effects
 )]
 #![warn(missing_docs)]
+#![doc(
+    html_logo_url = "https://raw.githubusercontent.com/suitsu31-club/wakuwaku-docs/main/icon.svg"
+)]
 
 pub mod services;
 
 pub use services::ServiceCreation;
 pub use services::builder::ServiceBuilder;
-pub use services::cron_job::{CronJob, CronTick};
+pub use services::cron_job::{CronJob, CronJobInterval, CronTick};
 
 /// Capability-typed data access: the [`wakuwaku-entity`](wakuwaku_entity)
 /// crate.

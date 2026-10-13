@@ -8,6 +8,8 @@
 //!
 //! The [`Publisher`] writes events with the [`headers`] the consumer reads
 //! back.
+//!
+//! See the [defining events guide](https://www.wakuwaku.rs/en/docs/events/defining-events).
 
 pub mod headers;
 pub mod publisher;

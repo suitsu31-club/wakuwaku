@@ -24,6 +24,8 @@
 //! impl CanWrite<Session> for ApiReplica {}
 //! ```
 //!
+//! See the [capabilities guide](https://www.wakuwaku.rs/en/docs/data#capabilities).
+//!
 //! [`Db`]: crate::query::Db
 
 /// Something a query can read or write: a table, a key space, a document

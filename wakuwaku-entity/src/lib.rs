@@ -1,42 +1,21 @@
 //! Capability-typed data access for the wakuwaku stack.
 //!
-//! Every query is a value, and every handle that runs queries is a
-//! [`kanau::processor::Processor`]. A query declares which [entities](Entity)
-//! it reads and writes as its [`Effect`], and a [`Db`] handle carries a
-//! capability type that must [cover](Covers) that effect. A handle built
-//! with [`ReadOnly`] therefore can't run a write query: the program doesn't
-//! compile.
+//! A query declares the [entities](Entity) it reads and writes as its
+//! [`Effect`]; a [`Db`] handle runs it, as a
+//! [`kanau::processor::Processor`], only if the handle's capability
+//! [covers](Covers) that effect. Sending a write query to a [`ReadOnly`]
+//! handle doesn't compile.
 //!
-//! # Layers
-//!
-//! - [`effect`]: entities, the capabilities to access them, effects, and
-//!   hooks around write queries.
-//! - [`query`]: [`Query`], [`Execute`], [`DataSource`] and the [`Db`] handle.
-//! - `sqlx` (features `sqlx-pg`, `sqlx-mysql`): sqlx data sources and
-//!   transactions written as pure state machines.
-//! - `redis` (feature `redis`): a Redis data source, typed collections
-//!   (caches, locks, a rate limiter), and structures that can be followed as
-//!   they change (pipes, live views, stream buffers).
+//! - [`effect`]: entities, capabilities, effects, and hooks around write
+//!   queries.
+//! - [`query`]: [`Query`], [`Execute`], [`DataSource`] and [`Db`].
+//! - `sqlx` (features `sqlx-pg` (default), `sqlx-mysql`): sqlx data sources
+//!   and transactions.
+//! - `redis` (feature `redis`): a Redis data source and typed collections.
 //! - `meilisearch` (feature `meilisearch`): Meilisearch indexes as entities,
-//!   typed filters, tenant tokens for frontends, and helpers to keep an
-//!   index in sync with its source of truth.
+//!   typed filters, tenant tokens, and index sync.
 //!
-//! # Features
-//!
-//! | Feature       | Default | Enables                                   |
-//! |---------------|---------|-------------------------------------------|
-//! | `sqlx-pg`     | yes     | PostgreSQL through sqlx                   |
-//! | `sqlx-mysql`  | no      | MySQL through sqlx                        |
-//! | `redis`       | no      | Redis through `redis`                     |
-//! | `meilisearch` | no      | Meilisearch through `meilisearch-sdk`     |
-//!
-//! # What the types prove
-//!
-//! The capability check proves *routing*: code wired to a `Db<_, ReadOnly>`
-//! never issues a query declared as a write. It can't prove that a query
-//! declared as a read doesn't write, so keep the database's own guard on
-//! replicas (a hot standby rejects writes, and `default_transaction_read_only`
-//! does the same on a primary).
+//! See the [data access guide](https://www.wakuwaku.rs/en/docs/data).
 
 #![deny(
     clippy::expect_used,
@@ -45,6 +24,9 @@
     clippy::arithmetic_side_effects
 )]
 #![warn(missing_docs)]
+#![doc(
+    html_logo_url = "https://raw.githubusercontent.com/suitsu31-club/wakuwaku-docs/main/icon.svg"
+)]
 
 pub mod effect;
 #[cfg(feature = "meilisearch")]

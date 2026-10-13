@@ -60,6 +60,8 @@
 //! let posts = AfterWrite::new(postgres, indexer, LogError);
 //! # }
 //! ```
+//!
+//! See the [sync guide](https://www.wakuwaku.rs/en/docs/data/meilisearch/sync#the-indexer).
 
 use crate::meilisearch::sync::{Key, Projection, Reindex, SyncError};
 use crate::meilisearch::write::{Delete, Upsert, WaitTask};
@@ -85,11 +87,20 @@ pub const DEFAULT_TASK_TIMEOUT: Duration = Duration::from_secs(30);
 ///
 /// It processes anything that converts into a [`Reindex`] of the index,
 /// so it can be the hook of an [`AfterWrite`](crate::AfterWrite) directly.
+/// Only the keys of a change are used and documents always come from a
+/// fresh load, so a change delivered twice or late does no harm. Load from
+/// the primary: a lagging replica hands it the row as it was before.
 ///
 /// By default it waits until Meilisearch has applied its writes, so a
 /// success means the index is up to date with what it loaded. Without
 /// waiting, a task that fails later goes unnoticed until the next
 /// [`rebuild`](super::rebuild()).
+///
+/// # Errors
+///
+/// [`SyncError::Source`] if loading failed, before anything is written;
+/// [`SyncError::Meilisearch`] if a write or a wait failed. Writes enqueued
+/// before the failure stay enqueued.
 #[derive(Debug, Clone)]
 pub struct Indexer<Src, M, P> {
     source: Src,

@@ -1,25 +1,19 @@
-//! Transactions as pure state machines.
+//! Transactions as state machines whose steps run queries.
 //!
-//! Nothing in this module does I/O. A [`TxFlow`] is the business logic of a
-//! transaction: given the result of its last query, it decides the next
-//! step. A [`TxMachine`] wraps a flow with the protocol around it (`BEGIN`,
-//! `COMMIT`, `ROLLBACK`, and what each failure means), and tells the driver
-//! which statement to send next. The driver in
-//! [`transaction`](crate::sqlx::transaction) only executes what the machine
-//! asks for and feeds the results back.
+//! A [`TxFlow`] value is the current state. [`TxFlow::step`] gets it with
+//! the open transaction, a [`Tx`], runs queries with [`Tx::run`], and
+//! returns the next state as a [`TxState`] ([`Tx::with`] or [`Tx::end`]).
+//! A state is terminal when [`TxFlow::finished`] projects it to a
+//! [`TxEnd`]; the driver ends such a state instead of stepping it.
 //!
-//! Both are plain values and plain functions, so a flow can be tested by
-//! feeding it results by hand, without a database.
-//!
-//! ```text
-//! Begin ──begun──▶ Run ⇄ ran ──▶ Commit ──committed──▶ Done
-//!   │                     └────▶ Rollback ─rolled_back─▶ Done
-//!   └──failed──────────────────────────────────────────▶ Done
-//! ```
+//! See the [transactions guide](https://www.wakuwaku.rs/en/docs/data/transactions).
 
 use crate::effect::io::{Effect, Kind};
 use crate::query::{Execute, Query};
 use crate::sqlx::backend::{SqlxBackend, SqlxSource};
+use ::sqlx::Transaction;
+use either::Either;
+use std::marker::PhantomData;
 
 /// SQL transaction isolation level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,29 +37,39 @@ pub struct TxMode {
     pub read_only: bool,
 }
 
-/// What the queries of the flow `F` return.
-pub type FlowOutput<F> =
-    <<F as TxFlow>::Query as Execute<SqlxSource<<F as TxFlow>::Database>>>::Output;
+/// The error of a query that runs in a transaction.
+///
+/// Whether a failed query aborted the transaction depends on the sqlx error
+/// behind it (see [`SqlxBackend::aborts_transaction`]). An error of the
+/// query's own, such as a lost optimistic-lock fence, never aborts it.
+pub trait AsSqlxError {
+    /// The sqlx error this is or wraps, or `None` for an error of the
+    /// query's own.
+    fn as_sqlx_error(&self) -> Option<&::sqlx::Error>;
+}
 
-/// Everything the flow `F` may touch: the effect of its query type.
-pub type FlowEffect<F> = <<F as TxFlow>::Query as Query>::Effect;
+impl AsSqlxError for ::sqlx::Error {
+    fn as_sqlx_error(&self) -> Option<&::sqlx::Error> {
+        Some(self)
+    }
+}
+
+/// Whether the effect of the query `Q` writes.
+type EffectKind<Q> = <<Q as Query>::Effect as Effect>::Kind;
 
 /// The business logic of a transaction, as a state machine.
 ///
-/// The implementing type is the state. Each transition consumes it and
-/// returns the next [`Step`]. The transitions are synchronous, so a flow
-/// can't do I/O; it can only ask for queries.
+/// The implementing type is the state. Its [`Effect`](Query::Effect) is
+/// everything the transaction may touch: a [`Db`](crate::query::Db) must
+/// cover it to run the flow, and a flow whose effect only reads starts its
+/// transaction `READ ONLY` and can't run a query that writes.
 ///
-/// A flow that issues several kinds of query uses an enum of them as
-/// [`Query`](Self::Query), with an enum of their outputs. The effect of that
-/// enum is the effect of the whole transaction: a [`Db`](crate::query::Db)
-/// must cover it to run the flow, and a flow whose effect only reads starts
-/// its transaction `READ ONLY`.
-pub trait TxFlow: Sized + Send {
+/// The terminal states are the [`TxEnd`]s, turned into states by
+/// `From<TxEnd<Self>>`. [`finished`](Self::finished) must give each back:
+/// `finished(end.into())` is `Right(end)`.
+pub trait TxFlow: Query + From<TxEnd<Self>> {
     /// The database the flow runs on.
     type Database: SqlxBackend;
-    /// The queries the flow issues.
-    type Query: Execute<SqlxSource<Self::Database>>;
     /// Returned to the caller after a commit.
     type Commit: Send;
     /// Returned to the caller after a rollback.
@@ -76,30 +80,25 @@ pub trait TxFlow: Sized + Send {
     /// Isolation level of the transaction, or `None` for the server's default.
     const ISOLATION: Option<IsolationLevel> = None;
 
-    /// First step, right after `BEGIN`.
-    fn start(self) -> Step<Self>;
-
-    /// Next step, given the result of the last query.
+    /// Run the queries of `state` on `tx`, and return the next state.
     ///
-    /// `output` is an error only if the transaction is still usable after
-    /// it (see [`SqlxBackend::aborts_transaction`]). The flow may go on,
-    /// commit, or roll back.
-    fn resume(self, output: Result<FlowOutput<Self>, ::sqlx::Error>) -> Step<Self>;
+    /// Never called with a terminal state. A query error reaches the step
+    /// as the query's result; if it ended the transaction on the server
+    /// ([`Tx::is_aborted`]), later queries fail without being sent and the
+    /// flow can only roll back, so it should go to a terminal state.
+    fn step(tx: Tx<'_, Self>, state: Self) -> impl Future<Output = TxState<'_, Self>> + Send;
 
-    /// The last query failed and ended the transaction on the server, so it
-    /// will be rolled back. Describe the outcome.
-    fn aborted(self, error: ::sqlx::Error) -> (Self::Abort, Self::Report);
+    /// `Right` with how the transaction ends if the state is terminal, the
+    /// state itself otherwise.
+    fn finished(self) -> Either<Self, TxEnd<Self>>;
 }
 
-/// What a flow does next.
-pub enum Step<F: TxFlow> {
-    /// Run `query`, then resume `next` with its result.
-    Run {
-        /// State to resume.
-        next: F,
-        /// Query to run.
-        query: F::Query,
-    },
+/// How a flow ends: its terminal states.
+///
+/// Not `Clone`: a terminal state is consumed once, when the transaction
+/// ends.
+#[derive(Debug)]
+pub enum TxEnd<F: TxFlow> {
     /// Commit the transaction.
     Commit {
         /// For the caller.
@@ -121,7 +120,7 @@ pub enum Step<F: TxFlow> {
 pub enum TxOutput<C, A> {
     /// The flow committed.
     Committed(C),
-    /// The flow rolled back, or the transaction was aborted.
+    /// The flow rolled back.
     RolledBack(A),
 }
 
@@ -151,136 +150,219 @@ pub enum TxError {
     /// `COMMIT` failed in transit; it may or may not have been applied.
     #[error("commit outcome unknown: {0}")]
     CommitUnknown(#[source] ::sqlx::Error),
+    /// The flow ended with a commit after a statement had aborted the
+    /// transaction; it was rolled back.
+    #[error("transaction aborted by a failed statement, rolled back")]
+    Aborted,
+    /// [`TxFlow::finished`] didn't give back the end the transaction was
+    /// closed with. If it still gave an end, the hook gets what became of
+    /// the transaction.
+    #[error("flow state after its end is not that end")]
+    EndMismatch,
+}
+
+/// An open transaction, handed to [`TxFlow::step`].
+pub struct Tx<'c, F: TxFlow> {
+    tx: Transaction<'c, F::Database>,
+    aborted: bool,
+    flow: PhantomData<fn() -> F>,
+}
+
+impl<'c, F: TxFlow> Tx<'c, F> {
+    pub(crate) const fn new(tx: Transaction<'c, F::Database>) -> Self {
+        Self {
+            tx,
+            aborted: false,
+            flow: PhantomData,
+        }
+    }
+
+    /// Run `query` in the transaction.
+    ///
+    /// If its error ended the transaction on the server, the transaction is
+    /// [aborted](Self::is_aborted): later queries fail without being sent,
+    /// and it can only roll back.
+    ///
+    /// A query that writes can't run in a flow whose effect only reads.
+    pub async fn run<Q>(mut self, query: Q) -> (Self, Result<Q::Output, Q::Error>)
+    where
+        Q: Execute<SqlxSource<F::Database>, Error: AsSqlxError>,
+        EffectKind<Q>: Kind<Join<EffectKind<F>> = EffectKind<F>>,
+    {
+        if self.aborted {
+            return (self, Err(already_aborted().into()));
+        }
+        let result = query.execute(&mut self.tx).await;
+        if let Err(error) = &result
+            && error
+                .as_sqlx_error()
+                .is_some_and(F::Database::aborts_transaction)
+        {
+            self.aborted = true;
+        }
+        (self, result)
+    }
+
+    /// Whether a query error ended the transaction on the server.
+    pub const fn is_aborted(&self) -> bool {
+        self.aborted
+    }
+
+    /// Go on with `state`.
+    pub fn with(self, state: F) -> TxState<'c, F> {
+        TxState {
+            tx: Some(self.tx),
+            state,
+            aborted: self.aborted,
+            commit: None,
+        }
+    }
+
+    /// End the transaction if `state` is terminal, else go on with it.
+    ///
+    /// A [commit](TxEnd::Commit) sends `COMMIT`, unless the transaction is
+    /// aborted: then it is rolled back, and the caller gets
+    /// [`TxError::Aborted`]. A [rollback](TxEnd::Rollback) sends `ROLLBACK`;
+    /// its result doesn't matter, as a transaction that was never committed
+    /// can't commit any more.
+    pub async fn end(self, state: F) -> TxState<'c, F> {
+        let end = match state.finished() {
+            Either::Left(state) => return self.with(state),
+            Either::Right(end) => end,
+        };
+        let commit = if matches!(end, TxEnd::Commit { .. }) && !self.aborted {
+            Some(self.tx.commit().await)
+        } else {
+            let _ = self.tx.rollback().await;
+            None
+        };
+        TxState {
+            tx: None,
+            state: end.into(),
+            aborted: self.aborted,
+            commit,
+        }
+    }
+}
+
+/// The error of a query sent after the transaction was aborted. It counts
+/// as aborting on every backend.
+fn already_aborted() -> ::sqlx::Error {
+    ::sqlx::Error::Protocol("transaction already aborted by an earlier statement".into())
+}
+
+/// A state of the flow, and the transaction it runs in: open, or ended if
+/// the state is terminal. Built by [`Tx::with`] and [`Tx::end`].
+pub struct TxState<'c, F: TxFlow> {
+    /// `None` once [`Tx::end`] closed it, and only then.
+    tx: Option<Transaction<'c, F::Database>>,
+    state: F,
+    aborted: bool,
+    /// The result of `COMMIT`, if it was sent.
+    commit: Option<Result<(), ::sqlx::Error>>,
+}
+
+impl<'c, F: TxFlow> TxState<'c, F> {
+    /// The open transaction and the state to step, or how the transaction
+    /// ended.
+    pub(crate) fn into_open(self) -> Either<(Tx<'c, F>, F), Done<F>> {
+        let Self {
+            tx,
+            state,
+            aborted,
+            commit,
+        } = self;
+        match tx {
+            Some(tx) => Either::Left((
+                Tx {
+                    tx,
+                    aborted,
+                    flow: PhantomData,
+                },
+                state,
+            )),
+            None => Either::Right(close(state, aborted, commit)),
+        }
+    }
 }
 
 /// A finished transaction.
-pub struct Done<F: TxFlow> {
+pub(crate) struct Done<F: TxFlow> {
     /// For the caller.
-    pub output: Result<TxOutput<F::Commit, F::Abort>, TxError>,
+    pub(crate) output: Result<TxOutput<F::Commit, F::Abort>, TxError>,
     /// For the hook. `None` if the flow never ran.
-    pub report: Option<TxFinalState<F::Report>>,
+    pub(crate) report: Option<TxFinalState<F::Report>>,
 }
 
-/// A transaction about to begin.
-pub struct Begin<F> {
-    flow: F,
-}
-
-impl<F: TxFlow> Begin<F> {
-    /// Prepare to run `flow`.
-    pub const fn new(flow: F) -> Self {
-        Self { flow }
-    }
-
-    /// How to begin: the flow's isolation level, and `READ ONLY` if its
-    /// effect doesn't write.
-    pub const fn mode(&self) -> TxMode {
-        TxMode {
-            isolation: F::ISOLATION,
-            read_only: !<<FlowEffect<F> as Effect>::Kind as Kind>::WRITES,
-        }
-    }
-
-    /// `BEGIN` succeeded.
-    pub fn begun(self) -> TxMachine<F> {
-        TxMachine::step(self.flow.start())
-    }
-
+impl<F: TxFlow> Done<F> {
     /// No connection, or `BEGIN` failed.
-    pub fn failed(self, error: ::sqlx::Error) -> Done<F> {
-        Done { output: Err(TxError::Begin(error)), report: None }
-    }
-}
-
-/// An open transaction, and the statement to send next.
-pub enum TxMachine<F: TxFlow> {
-    /// Run the query, then call [`Running::ran`].
-    Run(Running<F>, F::Query),
-    /// Send `COMMIT`, then call [`Committing::committed`].
-    Commit(Committing<F>),
-    /// Send `ROLLBACK`, then call [`RollingBack::rolled_back`].
-    Rollback(RollingBack<F>),
-}
-
-impl<F: TxFlow> TxMachine<F> {
-    fn step(step: Step<F>) -> Self {
-        match step {
-            Step::Run { next, query } => Self::Run(Running { flow: next }, query),
-            Step::Commit { output, report } => Self::Commit(Committing { output, report }),
-            Step::Rollback { output, report } => Self::Rollback(RollingBack { output, report }),
+    pub(crate) const fn not_begun(error: ::sqlx::Error) -> Self {
+        Self {
+            output: Err(TxError::Begin(error)),
+            report: None,
         }
     }
 }
 
-/// A flow waiting for the result of its query.
-pub struct Running<F> {
-    flow: F,
-}
-
-impl<F: TxFlow> Running<F> {
-    /// The query finished with `result`.
-    ///
-    /// If the error aborted the transaction, the flow is asked for its
-    /// outcome and the transaction rolls back; otherwise the flow resumes.
-    pub fn ran(self, result: Result<FlowOutput<F>, ::sqlx::Error>) -> TxMachine<F> {
-        match result {
-            Err(error) if F::Database::aborts_transaction(&error) => {
-                let (output, report) = self.flow.aborted(error);
-                TxMachine::Rollback(RollingBack { output, report })
-            }
-            result => TxMachine::step(self.flow.resume(result)),
-        }
+/// How to begin a transaction for `F`: its isolation level, and `READ ONLY`
+/// if its effect doesn't write.
+pub(crate) const fn mode<F: TxFlow>() -> TxMode {
+    TxMode {
+        isolation: F::ISOLATION,
+        read_only: !<EffectKind<F> as Kind>::WRITES,
     }
 }
 
-/// A transaction waiting for its `COMMIT`.
-pub struct Committing<F: TxFlow> {
-    output: F::Commit,
-    report: F::Report,
-}
-
-impl<F: TxFlow> Committing<F> {
-    /// `COMMIT` finished with `result`.
-    ///
-    /// An error from the server means it refused to commit, which leaves
-    /// the transaction rolled back. Any other error leaves the outcome
-    /// unknown.
-    pub fn committed(self, result: Result<(), ::sqlx::Error>) -> Done<F> {
-        let Self { output, report } = self;
-        match result {
-            Ok(()) => Done {
-                output: Ok(TxOutput::Committed(output)),
-                report: Some(TxFinalState::Committed(report)),
-            },
-            Err(error @ ::sqlx::Error::Database(_)) => Done {
-                output: Err(TxError::CommitRejected(error)),
-                report: Some(TxFinalState::RolledBack(report)),
-            },
-            Err(error) => Done {
-                output: Err(TxError::CommitUnknown(error)),
-                report: Some(TxFinalState::CommitUnknown(report)),
-            },
+/// What became of a transaction that [`Tx::end`] closed with the terminal
+/// `state`.
+fn close<F: TxFlow>(state: F, aborted: bool, commit: Option<Result<(), ::sqlx::Error>>) -> Done<F> {
+    let (output, report) = match state.finished() {
+        Either::Right(TxEnd::Commit { output, report }) => (Either::Left(output), report),
+        Either::Right(TxEnd::Rollback { output, report }) => (Either::Right(output), report),
+        Either::Left(_) => {
+            return Done {
+                output: Err(TxError::EndMismatch),
+                report: None,
+            };
         }
-    }
-}
-
-/// A transaction waiting for its `ROLLBACK`.
-pub struct RollingBack<F: TxFlow> {
-    output: F::Abort,
-    report: F::Report,
-}
-
-impl<F: TxFlow> RollingBack<F> {
-    /// `ROLLBACK` was sent.
-    ///
-    /// Its result doesn't matter: a transaction that was never committed
-    /// can't commit any more, whether `ROLLBACK` succeeded or the connection
-    /// died.
-    pub fn rolled_back(self) -> Done<F> {
-        Done {
-            output: Ok(TxOutput::RolledBack(self.output)),
-            report: Some(TxFinalState::RolledBack(self.report)),
+    };
+    let (output, state) = match (output, commit) {
+        (Either::Left(output), Some(Ok(()))) => (
+            Ok(TxOutput::Committed(output)),
+            TxFinalState::Committed(report),
+        ),
+        (Either::Left(_), Some(Err(error @ ::sqlx::Error::Database(_)))) => (
+            Err(TxError::CommitRejected(error)),
+            TxFinalState::RolledBack(report),
+        ),
+        (Either::Left(_), Some(Err(error))) => (
+            Err(TxError::CommitUnknown(error)),
+            TxFinalState::CommitUnknown(report),
+        ),
+        (Either::Left(_), None) if aborted => {
+            (Err(TxError::Aborted), TxFinalState::RolledBack(report))
         }
+        (Either::Right(output), None) => (
+            Ok(TxOutput::RolledBack(output)),
+            TxFinalState::RolledBack(report),
+        ),
+        // `finished` turned the end the transaction was closed with into
+        // the other one.
+        (Either::Left(_), None) => (Err(TxError::EndMismatch), TxFinalState::RolledBack(report)),
+        (Either::Right(_), Some(Ok(()))) => {
+            (Err(TxError::EndMismatch), TxFinalState::Committed(report))
+        }
+        (Either::Right(_), Some(Err(::sqlx::Error::Database(_)))) => {
+            (Err(TxError::EndMismatch), TxFinalState::RolledBack(report))
+        }
+        (Either::Right(_), Some(Err(_))) => (
+            Err(TxError::EndMismatch),
+            TxFinalState::CommitUnknown(report),
+        ),
+    };
+    Done {
+        output,
+        report: Some(state),
     }
 }
 
@@ -289,8 +371,8 @@ mod tests {
     use super::*;
     use crate::effect::io::{Read, Write};
     use crate::effect::markers::Entity;
+    use ::sqlx::Postgres;
     use ::sqlx::error::{DatabaseError, ErrorKind};
-    use ::sqlx::{PgConnection, Postgres};
     use std::borrow::Cow;
     use std::error::Error as StdError;
     use std::fmt;
@@ -298,73 +380,58 @@ mod tests {
     struct Account;
     impl Entity for Account {}
 
-    /// A query that returns a canned result and never touches the connection.
-    struct Canned<X>(i64, std::marker::PhantomData<fn() -> X>);
+    /// A flow that only ends: its states are a start and its ends.
+    enum Check<X: Effect> {
+        Start(PhantomData<fn() -> X>),
+        End(TxEnd<Check<X>>),
+    }
 
-    impl<X: Effect> Query for Canned<X> {
+    impl<X: Effect> Query for Check<X> {
         type Effect = X;
     }
 
-    impl<X: Effect> Execute<SqlxSource<Postgres>> for Canned<X> {
-        type Output = i64;
-        async fn execute(self, _: &mut PgConnection) -> Result<i64, ::sqlx::Error> {
-            Ok(self.0)
+    impl<X: Effect> From<TxEnd<Check<X>>> for Check<X> {
+        fn from(end: TxEnd<Check<X>>) -> Self {
+            Check::End(end)
         }
     }
 
-    /// Reads a balance, then commits it if it is positive, else rolls back.
-    /// The report records every result the flow saw.
-    enum Check<X> {
-        Init(std::marker::PhantomData<fn() -> X>),
-        Reading(Vec<String>),
-    }
-
-    impl<X> Check<X> {
-        const fn init() -> Self {
-            Check::Init(std::marker::PhantomData)
-        }
-    }
-
-    impl<X: Effect + 'static> TxFlow for Check<X> {
+    impl<X: Effect> TxFlow for Check<X> {
         type Database = Postgres;
-        type Query = Canned<X>;
         type Commit = i64;
         type Abort = String;
         type Report = Vec<String>;
 
         const ISOLATION: Option<IsolationLevel> = Some(IsolationLevel::Serializable);
 
-        fn start(self) -> Step<Self> {
-            Step::Run { next: Check::Reading(Vec::new()), query: Canned(0, Default::default()) }
+        async fn step(tx: Tx<'_, Self>, state: Self) -> TxState<'_, Self> {
+            tx.end(state).await
         }
 
-        fn resume(self, output: Result<i64, ::sqlx::Error>) -> Step<Self> {
-            let Check::Reading(mut seen) = self else {
-                return Step::Rollback { output: "bad state".into(), report: Vec::new() };
-            };
-            match output {
-                Ok(balance) if balance > 0 => {
-                    seen.push(format!("ok {balance}"));
-                    Step::Commit { output: balance, report: seen }
-                }
-                Ok(balance) => {
-                    seen.push(format!("ok {balance}"));
-                    Step::Rollback { output: "not positive".into(), report: seen }
-                }
-                Err(error) => {
-                    seen.push(format!("err {error}"));
-                    Step::Rollback { output: "client error".into(), report: seen }
-                }
+        fn finished(self) -> Either<Self, TxEnd<Self>> {
+            match self {
+                Check::End(end) => Either::Right(end),
+                state => Either::Left(state),
             }
-        }
-
-        fn aborted(self, error: ::sqlx::Error) -> (String, Vec<String>) {
-            (format!("aborted: {error}"), vec!["aborted".into()])
         }
     }
 
     type ReadCheck = Check<Read<Account>>;
     type WriteCheck = Check<(Read<Account>, Write<Account>)>;
+
+    fn commit(output: i64) -> WriteCheck {
+        Check::End(TxEnd::Commit {
+            output,
+            report: vec!["commit".into()],
+        })
+    }
+
+    fn rollback(output: &str) -> WriteCheck {
+        Check::End(TxEnd::Rollback {
+            output: output.into(),
+            report: vec!["rollback".into()],
+        })
+    }
 
     #[derive(Debug)]
     struct ServerError;
@@ -402,87 +469,84 @@ mod tests {
         ::sqlx::Error::Io(std::io::Error::other("connection reset"))
     }
 
-    fn running<F: TxFlow>(flow: F) -> Running<F> {
-        match Begin::new(flow).begun() {
-            TxMachine::Run(running, _) => running,
-            _ => unreachable!("flow starts with a query"),
-        }
-    }
-
     #[test]
     fn mode_is_read_only_iff_effect_only_reads() {
-        let read = Begin::new(ReadCheck::init()).mode();
-        let write = Begin::new(WriteCheck::init()).mode();
-        assert_eq!(read, TxMode { isolation: Some(IsolationLevel::Serializable), read_only: true });
-        assert!(!write.read_only);
+        assert_eq!(
+            mode::<ReadCheck>(),
+            TxMode {
+                isolation: Some(IsolationLevel::Serializable),
+                read_only: true
+            }
+        );
+        assert!(!mode::<WriteCheck>().read_only);
     }
 
     #[test]
-    fn failed_begin_never_runs_the_flow() {
-        let done = Begin::new(ReadCheck::init()).failed(io_error());
-        assert!(matches!(done.output, Err(TxError::Begin(_))));
-        assert!(done.report.is_none());
+    fn already_aborted_counts_as_aborting() {
+        assert!(Postgres::aborts_transaction(&already_aborted()));
     }
 
     #[test]
     fn commit_path() {
-        let TxMachine::Commit(committing) = running(WriteCheck::init()).ran(Ok(5)) else {
-            unreachable!("positive balance commits")
-        };
-        let done = committing.committed(Ok(()));
+        let done = close(commit(5), false, Some(Ok(())));
         assert!(matches!(done.output, Ok(TxOutput::Committed(5))));
-        assert_eq!(done.report, Some(TxFinalState::Committed(vec!["ok 5".into()])));
+        assert_eq!(
+            done.report,
+            Some(TxFinalState::Committed(vec!["commit".into()]))
+        );
     }
 
     #[test]
-    fn flow_rollback_path() {
-        let TxMachine::Rollback(rolling_back) = running(WriteCheck::init()).ran(Ok(0)) else {
-            unreachable!("zero balance rolls back")
-        };
-        let done = rolling_back.rolled_back();
-        assert!(matches!(&done.output, Ok(TxOutput::RolledBack(why)) if why == "not positive"));
-        assert_eq!(done.report, Some(TxFinalState::RolledBack(vec!["ok 0".into()])));
-    }
-
-    #[test]
-    fn client_side_error_resumes_the_flow() {
-        let TxMachine::Rollback(rolling_back) =
-            running(WriteCheck::init()).ran(Err(::sqlx::Error::RowNotFound))
-        else {
-            unreachable!("the flow rolls back on errors it sees")
-        };
-        let done = rolling_back.rolled_back();
-        assert!(matches!(&done.output, Ok(TxOutput::RolledBack(why)) if why == "client error"));
-    }
-
-    #[test]
-    fn aborting_error_skips_resume_and_rolls_back() {
-        for error in [::sqlx::Error::Database(Box::new(ServerError)), io_error()] {
-            let TxMachine::Rollback(rolling_back) = running(WriteCheck::init()).ran(Err(error))
-            else {
-                unreachable!("an aborted transaction must roll back")
-            };
-            let done = rolling_back.rolled_back();
-            assert!(
-                matches!(&done.output, Ok(TxOutput::RolledBack(why)) if why.starts_with("aborted"))
+    fn rollback_path_aborted_or_not() {
+        for aborted in [false, true] {
+            let done = close(rollback("no"), aborted, None);
+            assert!(matches!(&done.output, Ok(TxOutput::RolledBack(why)) if why == "no"));
+            assert_eq!(
+                done.report,
+                Some(TxFinalState::RolledBack(vec!["rollback".into()]))
             );
-            assert_eq!(done.report, Some(TxFinalState::RolledBack(vec!["aborted".into()])));
         }
     }
 
     #[test]
-    fn rejected_commit_is_rolled_back_and_lost_commit_is_unknown() {
-        let commit = || match running(WriteCheck::init()).ran(Ok(5)) {
-            TxMachine::Commit(committing) => committing,
-            _ => unreachable!("positive balance commits"),
-        };
+    fn commit_after_abort_is_rolled_back() {
+        let done = close(commit(5), true, None);
+        assert!(matches!(done.output, Err(TxError::Aborted)));
+        assert_eq!(
+            done.report,
+            Some(TxFinalState::RolledBack(vec!["commit".into()]))
+        );
+    }
 
-        let rejected = commit().committed(Err(::sqlx::Error::Database(Box::new(ServerError))));
+    #[test]
+    fn rejected_commit_is_rolled_back_and_lost_commit_is_unknown() {
+        let rejected = close(
+            commit(5),
+            false,
+            Some(Err(::sqlx::Error::Database(Box::new(ServerError)))),
+        );
         assert!(matches!(rejected.output, Err(TxError::CommitRejected(_))));
         assert!(matches!(rejected.report, Some(TxFinalState::RolledBack(_))));
 
-        let lost = commit().committed(Err(io_error()));
+        let lost = close(commit(5), false, Some(Err(io_error())));
         assert!(matches!(lost.output, Err(TxError::CommitUnknown(_))));
         assert!(matches!(lost.report, Some(TxFinalState::CommitUnknown(_))));
+    }
+
+    #[test]
+    fn end_mismatch_reports_what_became_of_the_transaction() {
+        let not_terminal = close(WriteCheck::Start(PhantomData), false, Some(Ok(())));
+        assert!(matches!(not_terminal.output, Err(TxError::EndMismatch)));
+        assert!(not_terminal.report.is_none());
+
+        let committed_as_rollback = close(rollback("no"), false, Some(Ok(())));
+        assert!(matches!(
+            committed_as_rollback.output,
+            Err(TxError::EndMismatch)
+        ));
+        assert!(matches!(
+            committed_as_rollback.report,
+            Some(TxFinalState::Committed(_))
+        ));
     }
 }

@@ -43,7 +43,7 @@ wakuwaku = { version = "1.0.0-rc1", features = ["iggy", "sqlx-pg", "redis"] }
 ```rust
 use std::time::Duration;
 use wakuwaku::deps::kanau::processor::Processor;
-use wakuwaku::{CronJob, CronTick, ServiceBuilder, ServiceCreation};
+use wakuwaku::{CronJob, CronJobInterval, CronTick, ServiceBuilder, ServiceCreation};
 
 #[derive(Clone)]
 struct SessionStore;
@@ -65,7 +65,7 @@ impl Processor<CronTick> for ExpireSessions {
 }
 
 impl CronJob for ExpireSessions {
-    const INTERVAL: Duration = Duration::from_secs(60);
+    const INTERVAL: CronJobInterval = CronJobInterval::AtLeast(Duration::from_secs(60));
 }
 
 #[tokio::main]
@@ -77,6 +77,10 @@ async fn main() {
     // Build gRPC servers and Iggy handlers from `services` the same way:
     // `services.grpc_service::<XxxServer<_>, Impl, _>(XxxServer::new)`,
     // `services.iggy_consumer::<Handler, _, _>()`.
+    // Components built from several services, or by hand, need no
+    // `ServiceCreation` impl: `.compose_cron_job(|s| ...)`,
+    // `.compose_grpc_service(|s| XxxServer::new(...))`,
+    // `.compose_iggy_consumer(|s| Arc::new(...))`.
     let _ = services;
 
     tokio::signal::ctrl_c().await.ok();
@@ -84,7 +88,9 @@ async fn main() {
 }
 ```
 
-Cron jobs run locally, each on a fixed grid of `INTERVAL`. Runs of one job never overlap, and a run that overruns skips the ticks it covered. Every replica runs its own jobs, so make jobs idempotent or partition their work.
+Cron jobs run locally. `INTERVAL` says how runs are spaced: `AfterFinish(d)` waits `d` after each run ends, `AtLeast(d)` starts runs at least `d` apart without overlapping (an overrunning run is followed at once), and `AfterStart(d)` starts runs on a fixed grid of `d` even if they overlap. Every replica runs its own jobs, so make jobs idempotent or partition their work.
+
+`CronRuntime` and the Iggy `ConsumerRuntime` stop the same way: `shutdown()` stops starting new work and waits for the work in flight to finish, `abort()` cancels the work in flight at its next `.await`. Dropping either runtime aborts without waiting.
 
 ## Migrating from 0.3
 

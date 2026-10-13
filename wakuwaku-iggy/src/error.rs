@@ -1,4 +1,7 @@
 //! Errors of handlers, setup and publishing.
+//!
+//! See the [error handling guide](https://www.wakuwaku.rs/en/docs/events/error-handling)
+//! for choosing an [`ErrorClass`].
 
 use crate::events::EventTypeTag;
 use std::fmt::{Display, Formatter};
@@ -7,12 +10,15 @@ use std::fmt::{Display, Formatter};
 /// call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorClass {
-    /// Infrastructure is down. The same chunk is retried in place, with the
-    /// configured delays, until it succeeds. The partition makes no progress
-    /// meanwhile.
+    /// Infrastructure is down. The same chunk is retried in place until it
+    /// succeeds, waiting [`retry_delays`](crate::ConsumerConfig::retry_delays)
+    /// between attempts (the last delay repeats). The partition makes no
+    /// progress meanwhile.
     Transient,
     /// The key fails. Its unfinished work goes to the retry topic, and the
-    /// key's later events wait behind it.
+    /// key's later events wait behind it there. The key is retried once after
+    /// each of the [`retry_delays`](crate::ConsumerConfig::retry_delays); if
+    /// the last attempt fails, its failed runs are dropped and logged.
     Retryable,
     /// The chunk can never succeed. It is dropped and logged, and the rest of
     /// the run continues.

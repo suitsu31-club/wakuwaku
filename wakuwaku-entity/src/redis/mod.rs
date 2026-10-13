@@ -25,6 +25,7 @@
 //!
 //! impl<C: ConnectionLike + Clone + Send + Sync> Execute<RedisSource<C>> for StoreSession {
 //!     type Output = ();
+//!     type Error = redis::RedisError;
 //!     async fn execute(self, conn: &mut C) -> redis::RedisResult<()> {
 //!         conn.set_ex(format!("session:{}", self.token), self.user, 3600).await
 //!     }
@@ -51,9 +52,10 @@
 //! An item lives under `@@wakuwaku-entity:<kind>:<namespace>:<name>`, where
 //! `<kind>` is the type of the structure. An item made of several keys
 //! wraps `<namespace>:<name>` in braces and appends a suffix to each key, so
-//! all of its keys share one cluster hash slot. The namespace separates
-//! structures of the same type: two structures of the same kind with the
-//! same namespace share their keys, so give each one its own namespace.
+//! all of its keys share one cluster hash slot. Two structures of the same
+//! kind with the same namespace share their keys.
+//!
+//! See the [Redis guide](https://www.wakuwaku.rs/en/docs/data/redis).
 
 pub mod collection;
 pub mod dynamic;
@@ -85,7 +87,7 @@ where
     type Connection = C;
     type Error = RedisError;
 
-    async fn run<Q: Execute<Self>>(&self, query: Q) -> Result<Q::Output, RedisError> {
+    async fn run<Q: Execute<Self>>(&self, query: Q) -> Result<Q::Output, Q::Error> {
         let mut connection = self.connection.clone();
         query.execute(&mut connection).await
     }
