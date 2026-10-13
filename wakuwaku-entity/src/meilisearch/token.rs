@@ -1,11 +1,8 @@
 //! Tenant tokens, for frontends that search Meilisearch directly.
 //!
-//! A tenant token is a JWT the server signs with a Meilisearch API key and
-//! hands to a client. The client sends it to Meilisearch as its API key.
-//! Meilisearch then lets it search only the indexes listed in the token,
-//! and only the documents matching the token's filter for each index. The
-//! token's filter is applied as a separate element of the search's filter
-//! array, so nothing the client sends can lift it.
+//! A [`TokenSigner`] signs JWTs that a client sends to Meilisearch as its
+//! API key; Meilisearch then lets it search only the indexes listed in the
+//! token, each under the token's filter.
 //!
 //! ```no_run
 //! # use wakuwaku_entity::meilisearch::filter::{Field, Filter};
@@ -46,17 +43,7 @@
 //! # }
 //! ```
 //!
-//! # The signing key
-//!
-//! - Sign with a key that has the `search` action and nothing else. A
-//!   token can't do more than its key, but the key itself must not leak
-//!   more than search. Meilisearch rejects tokens signed with the master
-//!   key.
-//! - A single token can't be revoked. Deleting its key revokes every token
-//!   the key signed. Keep expiry times short.
-//! - What a token doesn't restrict is up to the client: attributes to
-//!   retrieve, facets, sort, page size, hybrid search. Restrict those in
-//!   the index settings (see the [module documentation](super)).
+//! See the [tenant tokens guide](https://www.wakuwaku.rs/en/docs/data/meilisearch/tenant-tokens).
 
 use crate::effect::io::{Covers, Read};
 use crate::meilisearch::SearchIndex;
@@ -83,8 +70,10 @@ pub struct TokenSigner<C> {
 impl<C> TokenSigner<C> {
     /// Sign with the API key of `client`, whose uid is `key_uid`.
     ///
-    /// The key must have the `search` action. Give it no other action: see
-    /// the [module documentation](self).
+    /// The key must have the `search` action, and should have no other: a
+    /// token can't do more than its key. Meilisearch rejects tokens signed
+    /// with the master key. Tokens can't be revoked one by one: deleting
+    /// the key revokes every token it signed.
     pub fn new(key_uid: impl Into<String>, client: Client) -> Self {
         Self {
             key_uid: key_uid.into(),
@@ -123,7 +112,13 @@ pub struct TenantToken<'s, C> {
 impl<C> TenantToken<'_, C> {
     /// Allow searching the documents of `I` that match `scope`.
     ///
-    /// Replaces any earlier rule for `I`.
+    /// Meilisearch applies the scope as a separate element of each search's
+    /// filter array, so nothing the client sends can lift it. Replaces any
+    /// earlier rule for `I`.
+    ///
+    /// # Errors
+    ///
+    /// [`FilterError`] if `scope` can't be [rendered](Filter::render).
     pub fn scoped<I: SearchIndex>(
         mut self,
         scope: &Filter<I::Filterable>,
@@ -149,9 +144,12 @@ impl<C> TenantToken<'_, C> {
         self
     }
 
-    /// Sign the token.
+    /// Sign the token. Signing is local: it sends no request.
     ///
-    /// Fails if it has already expired, or if the key uid isn't a UUID v4.
+    /// # Errors
+    ///
+    /// Fails if the token has already expired, or if the key uid isn't a
+    /// UUID v4.
     pub fn sign(self) -> Result<String, Error> {
         self.signer.client.generate_tenant_token(
             self.signer.key_uid.clone(),

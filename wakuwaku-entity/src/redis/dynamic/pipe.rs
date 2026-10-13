@@ -1,13 +1,9 @@
 //! One-way message pipes from one sender to one receiver.
 //!
-//! A pipe is a queue of messages, like a websocket in one direction: the
-//! receiver gets each message once, in the order they were sent, until the
-//! sender closes the pipe. Messages wait in Redis while no receiver is
-//! listening, so the receiver may connect before or after the sender. Use a
-//! second pipe for the other direction.
-//!
-//! A message is removed from Redis when the receiver takes it, so a
-//! receiver that fails after taking a message loses it.
+//! The receiver gets each message once, in the order they were sent, until
+//! the sender closes the pipe. Taking a message removes it, so a receiver
+//! that fails after taking one loses it. See the
+//! [pipes guide](https://www.wakuwaku.rs/en/docs/data/redis/pipe).
 //!
 //! ```no_run
 //! use std::time::Duration;
@@ -70,15 +66,11 @@ type Items<N, B> = PhantomData<fn(&N) -> B>;
 
 /// Pipes of messages `B`, named by `N`.
 ///
-/// Each name is two lists in one cluster hash slot: the messages, and a
-/// list holding a marker once the sender closed the pipe. The receiver
-/// blocks on both, taking messages first, so it sees the close after every
-/// message sent before it.
-///
-/// Every send and the close restart the TTL of what they write, so a pipe
-/// whose sender stopped without closing it disappears one TTL later, and a
+/// The receiver sees the close after every message sent before it. Every
+/// send and the close restart the TTL of what they write, so a pipe whose
+/// sender stopped without closing it disappears one TTL later, and a
 /// receiver that gets nothing for a whole TTL fails instead of waiting
-/// forever. A sender that may stay quiet for longer must send a heartbeat.
+/// forever.
 pub struct Pipe<N: ?Sized, B> {
     namespace: &'static str,
     ttl: Duration,

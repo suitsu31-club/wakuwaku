@@ -1,18 +1,9 @@
 //! Rebuilding an index from its whole source.
 //!
-//! [`rebuild()`] fills a fresh copy of the index, then swaps it with the live
-//! index in one step: searches see either the old documents or the new
-//! ones, never a half-filled index. Use it to fill a new index, after
-//! changing settings or the projection, and periodically to repair drift.
+//! [`rebuild()`] fills a fresh copy of the index from a [`Scan`] of the
+//! source, then swaps it with the live index in one step.
 //!
-//! # Writes during a rebuild
-//!
-//! The copy holds the source as each page was read. A change made to a
-//! row after its page was read, and reindexed into the live index, is lost
-//! at the swap. To catch up, reindex the keys changed since
-//! [`Rebuilt::started_at`] once the rebuild is done; this needs a change
-//! timestamp on the rows, and soft deletes to find deleted rows. Without a
-//! catch-up, the next rebuild repairs them.
+//! See the [sync guide](https://www.wakuwaku.rs/en/docs/data/meilisearch/sync#rebuilding-an-index).
 
 use crate::effect::markers::CanWrite;
 use crate::meilisearch::sync::{Key, Scan, SyncError};
@@ -58,7 +49,7 @@ impl Default for RebuildOptions {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rebuilt {
     /// When the rebuild started reading the source. Changes made since may
-    /// be missing from the index; see the [module documentation](self).
+    /// be missing from the index: see [`rebuild()`].
     pub started_at: SystemTime,
     /// Documents written to the index, one per row that projects to a
     /// document.
@@ -71,13 +62,25 @@ pub struct Rebuilt {
 /// Fills a copy named with [`COPY_SUFFIX`] with the index's settings, the
 /// documents of every row of the [`Scan`], then swaps it with the live
 /// index (creating the live index if needed) and deletes the old
-/// documents. On failure the live index is left as it was, and the copy is
-/// deleted by the next rebuild.
+/// documents. Searches see either the old documents or the new ones, never
+/// a half-filled index. On failure the live index is left as it was, and
+/// the copy is deleted by the next rebuild.
+///
+/// The copy holds each row as its page was read: a change to a row after
+/// that, reindexed into the live index meanwhile, is lost at the swap.
+/// Reindex the keys changed since [`Rebuilt::started_at`] to catch up.
 ///
 /// The handle `meili` must be able to write the index; its API key needs
 /// the `indexes.create`, `indexes.delete`, `indexes.swap`,
 /// `settings.update`, `documents.add` and `tasks.get` actions on both the
 /// index and its copy.
+///
+/// # Errors
+///
+/// [`SyncError::Source`] if reading a page failed,
+/// [`SyncError::Meilisearch`] if a request or task failed or timed out, and
+/// [`SyncError::StuckScan`] if a page ended at the key the previous page
+/// ended at.
 pub async fn rebuild<P, Src, C>(
     projection: &P,
     source: &Src,

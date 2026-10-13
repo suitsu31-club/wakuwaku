@@ -1,36 +1,32 @@
 //! Transactions on sqlx sources.
 //!
-//! Write the transaction as a [`TxFlow`] (see [`flow`]), wrap its first state
-//! in a [`Transaction`], and process it with a [`Db`] whose capability covers
-//! the flow's effect. Each step runs its queries and returns the next state;
-//! the queries are the same [`Execute`](crate::Execute) values that run on
-//! their own.
+//! Write the transaction as a [`TxFlow`], wrap its first state in a
+//! [`Transaction`], and process it with a [`Db`] whose capability covers the
+//! flow's effect. The result is a [`TxOutput`] or a [`TxError`]; to act on
+//! how the transaction ended, wrap the handle in an
+//! [`AfterTransaction`](hook::AfterTransaction).
 //!
 //! ```no_run
 //! use kanau::processor::Processor;
 //! use sqlx::{PgConnection, PgPool, Postgres};
 //! use wakuwaku_entity::sqlx::backend::{PgSource, SqlxSource};
-//! use wakuwaku_entity::sqlx::transaction::{
-//!     Either, Transaction, Tx, TxEnd, TxFlow, TxOutput, TxState,
-//! };
-//! use wakuwaku_entity::{Db, Entity, Execute, Query, Read, ReadWrite, Write};
+//! use wakuwaku_entity::sqlx::transaction::{Either, Transaction, Tx, TxEnd, TxFlow, TxState};
+//! use wakuwaku_entity::{Db, Entity, Execute, Query, ReadWrite, Write};
 //!
 //! struct Account;
 //! impl Entity for Account {}
 //!
-//! /// Takes `amount` from `from` if the balance allows it. Rows affected.
-//! struct Debit { from: i64, amount: i64 }
-//!
-//! impl Query for Debit {
-//!     type Effect = (Read<Account>, Write<Account>);
+//! /// Adds `amount` to `to`. Rows affected.
+//! struct Credit { to: i64, amount: i64 }
+//! impl Query for Credit {
+//!     type Effect = Write<Account>;
 //! }
-//!
-//! impl Execute<SqlxSource<Postgres>> for Debit {
+//! impl Execute<SqlxSource<Postgres>> for Credit {
 //!     type Output = u64;
 //!     type Error = sqlx::Error;
 //!     async fn execute(self, conn: &mut PgConnection) -> Result<u64, sqlx::Error> {
-//!         let done = sqlx::query("UPDATE account SET balance = balance - $2 WHERE id = $1 AND balance >= $2")
-//!             .bind(self.from)
+//!         let done = sqlx::query("UPDATE account SET balance = balance + $2 WHERE id = $1")
+//!             .bind(self.to)
 //!             .bind(self.amount)
 //!             .execute(conn)
 //!             .await?;
@@ -38,83 +34,36 @@
 //!     }
 //! }
 //!
-//! /// Adds `amount` to `to`, and returns the new balance.
-//! struct Credit { to: i64, amount: i64 }
-//!
-//! impl Query for Credit {
+//! enum Bonus {
+//!     Start { to: i64 },
+//!     End(TxEnd<Bonus>),
+//! }
+//! impl Query for Bonus {
 //!     type Effect = Write<Account>;
 //! }
-//!
-//! impl Execute<SqlxSource<Postgres>> for Credit {
-//!     type Output = Option<i64>;
-//!     type Error = sqlx::Error;
-//!     async fn execute(self, conn: &mut PgConnection) -> Result<Option<i64>, sqlx::Error> {
-//!         sqlx::query_scalar("UPDATE account SET balance = balance + $2 WHERE id = $1 RETURNING balance")
-//!             .bind(self.to)
-//!             .bind(self.amount)
-//!             .fetch_optional(conn)
-//!             .await
+//! impl From<TxEnd<Bonus>> for Bonus {
+//!     fn from(end: TxEnd<Bonus>) -> Self {
+//!         Bonus::End(end)
 //!     }
 //! }
-//!
-//! /// Debit, then credit.
-//! enum Transfer {
-//!     Start { from: i64, to: i64, amount: i64 },
-//!     Debited { to: i64, amount: i64 },
-//!     End(TxEnd<Transfer>),
-//! }
-//!
-//! impl Transfer {
-//!     fn fail(why: &'static str) -> Self {
-//!         Transfer::End(TxEnd::Rollback { output: why, report: None })
-//!     }
-//! }
-//!
-//! impl Query for Transfer {
-//!     type Effect = (Read<Account>, Write<Account>);
-//! }
-//!
-//! impl From<TxEnd<Transfer>> for Transfer {
-//!     fn from(end: TxEnd<Transfer>) -> Self {
-//!         Transfer::End(end)
-//!     }
-//! }
-//!
-//! impl TxFlow for Transfer {
+//! impl TxFlow for Bonus {
 //!     type Database = Postgres;
-//!     /// The new balance of the credited account.
-//!     type Commit = i64;
-//!     type Abort = &'static str;
-//!     /// Event to publish once the transaction ended.
-//!     type Report = Option<i64>;
+//!     type Commit = ();
+//!     type Abort = ();
+//!     type Report = ();
 //!
 //!     async fn step(tx: Tx<'_, Self>, state: Self) -> TxState<'_, Self> {
-//!         match state {
-//!             Transfer::Start { from, to, amount } => {
-//!                 let (tx, debited) = tx.run(Debit { from, amount }).await;
-//!                 tx.with(match debited {
-//!                     Ok(1) => Transfer::Debited { to, amount },
-//!                     Ok(_) => Transfer::fail("insufficient funds"),
-//!                     Err(_) => Transfer::fail("debit failed"),
-//!                 })
-//!             }
-//!             Transfer::Debited { to, amount } => {
-//!                 let (tx, credited) = tx.run(Credit { to, amount }).await;
-//!                 tx.with(match credited {
-//!                     Ok(Some(balance)) => {
-//!                         Transfer::End(TxEnd::Commit { output: balance, report: Some(amount) })
-//!                     }
-//!                     Ok(None) => Transfer::fail("no such account"),
-//!                     Err(_) => Transfer::fail("credit failed"),
-//!                 })
-//!             }
-//!             end @ Transfer::End(_) => tx.end(end).await,
-//!         }
+//!         let Bonus::Start { to } = state else { unreachable!("never stepped when terminal") };
+//!         let (tx, credited) = tx.run(Credit { to, amount: 10 }).await;
+//!         tx.with(Bonus::End(match credited {
+//!             Ok(1) => TxEnd::Commit { output: (), report: () },
+//!             _ => TxEnd::Rollback { output: (), report: () },
+//!         }))
 //!     }
 //!
 //!     fn finished(self) -> Either<Self, TxEnd<Self>> {
 //!         match self {
-//!             Transfer::End(end) => Either::Right(end),
+//!             Bonus::End(end) => Either::Right(end),
 //!             state => Either::Left(state),
 //!         }
 //!     }
@@ -122,14 +71,12 @@
 //!
 //! # async fn run(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
 //! let db: Db<PgSource, ReadWrite> = Db::new(SqlxSource::new(pool));
-//! let outcome = db.process(Transaction(Transfer::Start { from: 1, to: 2, amount: 10 })).await?;
-//! assert!(matches!(outcome, TxOutput::Committed(_)));
+//! let outcome = db.process(Transaction(Bonus::Start { to: 2 })).await?;
 //! # Ok(())
 //! # }
 //! ```
 //!
-//! To act on how the transaction ended (publish its events, invalidate a
-//! cache, …), wrap the handle in an [`AfterTransaction`](hook::AfterTransaction).
+//! See the [transactions guide](https://www.wakuwaku.rs/en/docs/data/transactions).
 
 pub mod flow;
 pub mod hook;

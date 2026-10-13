@@ -1,12 +1,11 @@
 //! Typed data structures in Redis that can be followed as they change.
 //!
 //! - [`Pipe`](pipe::Pipe): messages from one sender to one receiver, each
-//!   taken by the receiver once. Two pipes make a duplex channel.
+//!   taken by the receiver once.
 //! - [`LiveView`](live_view::LiveView): a durable body with a linear
-//!   history of diffs. The latest version reads in O(1), and the history is
-//!   squashed into a new base when it grows past a bound.
+//!   history of diffs.
 //! - [`StreamBuffer`](stream_buffer::StreamBuffer): an append-only array of
-//!   bodies with an end, such as the chunks of an LLM response.
+//!   bodies with an end.
 //!
 //! Like the [collections](super::collection), each structure is a `Copy`
 //! value whose methods build [queries](crate::Query), and is the
@@ -15,15 +14,12 @@
 //! # Following changes
 //!
 //! Receiving from a pipe and subscribing to a live view or a stream buffer
-//! are queries too, so the capability of the [`Db`](crate::Db) is checked
-//! as usual. They output a receiver or subscription that waits with blocking
-//! Redis commands (`BLPOP`, `XREAD BLOCK`) on a connection of its own, passed
-//! to the query. A blocking command stalls every other command sent on the
-//! same socket, so don't share that connection, nor clone it from the
-//! multiplexed connection of the [`RedisSource`](super::RedisSource). It must
-//! also not time out responses before the block ends; for a
-//! [`MultiplexedConnection`](redis::aio::MultiplexedConnection), turn the
-//! response timeout off:
+//! output a receiver or subscription that waits with blocking commands
+//! (`BLPOP`, `XREAD BLOCK`) on a connection passed to the query. That
+//! connection must be used for nothing else (not a clone of the
+//! [`RedisSource`](super::RedisSource) connection) and must not time out
+//! responses before the block ends; for a
+//! [`MultiplexedConnection`](redis::aio::MultiplexedConnection):
 //!
 //! ```no_run
 //! use redis::AsyncConnectionConfig;
@@ -37,10 +33,10 @@
 //!
 //! Each receiver and subscription has an `async fn recv` and an
 //! `into_stream` that turns it into a [`Stream`](futures_util::Stream).
+//! Subscriptions catch up on what they missed before they wait, so they
+//! never skip an item.
 //!
-//! Live views and stream buffers are Redis streams, read with `XREAD`; a
-//! subscription catches up on what it missed before it waits, so it never
-//! skips an item.
+//! See the [Redis guide](https://www.wakuwaku.rs/en/docs/data/redis#following-changes-dedicated-connections).
 
 pub mod live_view;
 pub mod pipe;

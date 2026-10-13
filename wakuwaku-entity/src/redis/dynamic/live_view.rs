@@ -1,16 +1,10 @@
 //! Durable bodies with a linear history of diffs, followed as they change.
 //!
-//! A live view holds a body `B` at a version, starting at 1. Each
-//! [commit](LiveView::commit) names the version it builds on and moves the
-//! view to the next one, so writers that race see a conflict instead of
-//! overwriting each other. The view keeps the latest body, read in O(1),
-//! and its history: a base body followed by the diffs that lead to the
-//! latest one. Once the history holds more diffs than the view's bound, the
-//! next commit makes the latest body the new base and drops the diffs.
-//!
-//! Subscribers follow the view as [events](LiveViewEvent): a diff per
-//! commit, or the whole body when the diffs they missed were squashed into
-//! a new base.
+//! A [`LiveView`] holds a body at a version, starting at 1. Each
+//! [commit](LiveView::commit) names the version it builds on, so racing
+//! writers see a [conflict](Commit::Conflict). Subscribers follow the view
+//! as [events](LiveViewEvent). See the
+//! [live views guide](https://www.wakuwaku.rs/en/docs/data/redis/live-view).
 //!
 //! ```no_run
 //! use futures_util::StreamExt;
@@ -159,18 +153,14 @@ return {2, tonumber(version)}
 
 /// Durable bodies `B` with a linear history of diffs, named by `N`.
 ///
-/// Each name is two keys in one cluster hash slot: a hash holding the
-/// latest version and body (the head), and a Redis stream holding the
-/// history. The history starts with a base entry, the body at its
-/// version, followed by one entry per later version holding its diff. Each
-/// entry has the ID `<version>-0`. A base made by squashing also holds the
-/// diff from the previous version, so subscribers that are up to date keep
-/// receiving diffs.
+/// The latest version reads in O(1). Once the history holds
+/// [`max_diffs`](Self::max_diffs) diffs, the next commit squashes it into
+/// a new base; subscribers that were further behind then receive a
+/// [snapshot](LiveViewEvent::Snapshot).
 ///
 /// Live views don't expire. Removing one doesn't notify its subscribers,
 /// which keep waiting; recreating it restarts the versions at 1, which
-/// subscribers past version 1 don't see. Use a new name instead of
-/// recreating a view.
+/// subscribers past version 1 don't see.
 pub struct LiveView<N: ?Sized, B> {
     namespace: &'static str,
     max_diffs: usize,

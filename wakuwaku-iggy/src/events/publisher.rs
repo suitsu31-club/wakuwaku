@@ -1,4 +1,6 @@
 //! Publishing events to their main topic.
+//!
+//! See the [publishing guide](https://www.wakuwaku.rs/en/docs/events/publishing).
 
 use crate::error::Error;
 use crate::events::Event;
@@ -13,7 +15,8 @@ use std::sync::Arc;
 /// Publishes events of any type to their main topic in one stream.
 ///
 /// Events are partitioned by the hash of their key, so every event of a key
-/// lands in the same partition, in publish order.
+/// lands in the same partition, in publish order. Cloning is cheap: clones
+/// share the same client.
 #[derive(Debug, Clone)]
 pub struct Publisher {
     client: Arc<IggyClient>,

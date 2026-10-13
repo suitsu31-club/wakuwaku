@@ -1,24 +1,12 @@
 //! Transactions as state machines whose steps run queries.
 //!
-//! A [`TxFlow`] is the business logic of a transaction, and its value is the
-//! current state. The driver in [`transaction`](crate::sqlx::transaction)
-//! begins the transaction, then hands each state to [`TxFlow::step`] along
-//! with the open transaction, a [`Tx`]. The step runs queries on the [`Tx`]
-//! and returns the next state as a [`TxState`].
-//!
+//! A [`TxFlow`] value is the current state. [`TxFlow::step`] gets it with
+//! the open transaction, a [`Tx`], runs queries with [`Tx::run`], and
+//! returns the next state as a [`TxState`] ([`Tx::with`] or [`Tx::end`]).
 //! A state is terminal when [`TxFlow::finished`] projects it to a
-//! [`TxEnd`]. [`Tx::end`] sends `COMMIT` or `ROLLBACK` for a terminal state;
-//! a step may call it, and the driver calls it before every step, so a
-//! terminal state is never stepped.
+//! [`TxEnd`]; the driver ends such a state instead of stepping it.
 //!
-//! ```text
-//! BEGIN ──▶ end? ──no──▶ step ──▶ end? ──no──▶ step ──▶ …
-//!             └──yes──▶ COMMIT / ROLLBACK ──▶ done
-//! ```
-//!
-//! Each query runs where its result is used, so its output keeps its own
-//! type. The protocol around the steps stays here: which errors ended the
-//! transaction on the server, and what a failed `COMMIT` means.
+//! See the [transactions guide](https://www.wakuwaku.rs/en/docs/data/transactions).
 
 use crate::effect::io::{Effect, Kind};
 use crate::query::{Execute, Query};

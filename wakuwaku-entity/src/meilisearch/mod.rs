@@ -1,28 +1,18 @@
 //! Meilisearch as a data source.
 //!
-//! Meilisearch is a search engine, not a database. Three things set it apart
-//! from the other data sources of this crate:
+//! [`MeiliSource`] runs queries on a Meilisearch [`Client`]. Each index is a
+//! marker type implementing [`SearchIndex`]; the type is also an [`Entity`],
+//! so a search of `PostIndex` has the effect `Read<PostIndex>` and a write
+//! to it `Write<PostIndex>`, independent of the entity it projects.
 //!
-//! - Queries may come straight from end users, even from a browser that
-//!   talks to Meilisearch directly.
-//! - An index is never the source of truth. It holds a projection of data
-//!   that lives elsewhere, so writes to it rarely need hooks.
-//! - An index has to be kept in sync with that source.
-//!
-//! # Indexes are entities
-//!
-//! An index is described once by a type implementing [`SearchIndex`]. The
-//! type is also an [`Entity`], so capabilities apply as usual:
-//! [`ReadOnly`](crate::ReadOnly) may search every index, and an indexer
-//! service gets a capability that writes its indexes and nothing
-//! else. A query that searches `PostIndex` has the effect `Read<PostIndex>`,
-//! not `Read<Post>`: reading the projection doesn't need access to the
-//! source, and writing it doesn't grant write access to the source.
-//!
-//! Map capabilities to Meilisearch API keys when wiring: a
-//! [`MeiliSource`] built from a search key belongs in a read-only handle,
-//! and one built from a key with the `documents.*` and `settings.*` actions
-//! on some indexes belongs in a handle that writes only those indexes.
+//! - [`search`]: a client's [`SearchRequest`](search::SearchRequest), run
+//!   under a scope set by the server.
+//! - [`filter`]: typed filters and sorts.
+//! - [`token`]: tenant tokens, for frontends that search Meilisearch
+//!   directly.
+//! - [`write`](mod@write): upserts, deletes, settings, and waiting for
+//!   the tasks they enqueue.
+//! - [`sync`]: keeping an index in sync with its source of truth.
 //!
 //! ```no_run
 //! use kanau::processor::Processor;
@@ -97,44 +87,7 @@
 //! # }
 //! ```
 //!
-//! # Queries from end users
-//!
-//! - [`search`]: a [`SearchRequest`](search::SearchRequest) deserialized
-//!   from the client, run by the server under a scope the client can't
-//!   remove.
-//! - [`token`]: tenant tokens, for frontends that query Meilisearch
-//!   directly. Meilisearch enforces the token's scope on every search.
-//! - [`filter`]: the typed filters both of them use, and the escape hatch
-//!   for raw filter expressions.
-//!
-//! A tenant token restricts which indexes the client may search and which
-//! documents it may see. Everything else in a search request is up to the
-//! client: the attributes to retrieve, facets, sort, page size, hybrid
-//! search. The index settings are therefore part of the security
-//! configuration once a frontend talks to Meilisearch:
-//!
-//! - `displayedAttributes` defaults to every attribute. Keep secrets out of
-//!   [`SearchIndex::Document`] and list the displayed attributes anyway.
-//! - Every filterable attribute can also be used as a facet, which reveals
-//!   value counts among the documents the client may see.
-//! - `pagination.maxTotalHits` bounds how deep a client can page.
-//! - Any embedder configured on the index can be triggered by any client
-//!   allowed to search it.
-//!
-//! [`ApplySettings`](write::ApplySettings) writes [`SearchIndex::settings`]
-//! to the index; run it when deploying.
-//!
-//! # Writing and syncing
-//!
-//! - [`write`](self::write): upserting and deleting documents, waiting for
-//!   tasks, applying settings.
-//! - [`sync`]: keeping an index in sync with its source of truth.
-//!
-//! Meilisearch processes writes asynchronously: a write query outputs the
-//! [`TaskInfo`](meilisearch_sdk::task_info::TaskInfo) of an enqueued task,
-//! and errors such as a missing primary key only show up once the task
-//! runs. Wait for the task with [`WaitTask`](write::WaitTask) when the
-//! result matters.
+//! See the [Meilisearch guide](https://www.wakuwaku.rs/en/docs/data/meilisearch).
 
 pub mod filter;
 pub mod search;

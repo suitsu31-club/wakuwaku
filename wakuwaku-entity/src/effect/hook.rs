@@ -1,27 +1,19 @@
 //! Processors that run before or after write queries.
 //!
-//! A write query describes itself as a [`WriteQuery::Change`], built from the
-//! query alone. Many queries may share one change type (`UserChanged`), so
-//! one hook covers all of them. A hook is any [`Processor`] of that change:
+//! A write query describes itself as a [`WriteQuery::Change`]; a hook is
+//! any [`Processor`] of that change:
 //!
 //! - [`BeforeWrite`] runs the hook, then the query.
 //! - [`AfterWrite`] runs the query, then the hook if the query succeeded.
 //!
 //! Both wrap any processor of the query (a [`Db`](crate::query::Db) or
-//! another hook) and forward queries of [`ReadKind`] untouched. They nest:
-//! `AfterWrite<BeforeWrite<Db<_, _>, _, _>, _, _>`.
+//! another hook), forward queries of [`ReadKind`] untouched, and return the
+//! wrapped processor's output and error unchanged. A hook error goes to an
+//! error handler, a processor of that error whose own error is
+//! [`Infallible`]. Queries inside a transaction don't pass through these
+//! hooks.
 //!
-//! # Hook errors
-//!
-//! A hook never changes the result of the query. Its error goes to an error
-//! handler, a processor of the hook's error whose own error is
-//! [`Infallible`]: it must deal with the failure itself (log it, retry, park
-//! it in an outbox, …). The wrapped handle therefore stays a drop-in
-//! replacement: same output, same error as the processor it wraps.
-//!
-//! These hooks are for queries run on their own. Queries inside a
-//! transaction run on the transaction's connection and don't pass through
-//! them; hook the transaction's final state instead.
+//! See the [write hooks guide](https://www.wakuwaku.rs/en/docs/data/hooks).
 
 use crate::effect::io::{Effect, Kind, ReadKind, WriteKind};
 use crate::query::Query;

@@ -1,10 +1,9 @@
 //! Append-only arrays of bodies, followed as they grow.
 //!
-//! A stream buffer holds the bodies appended to it, in order, until its
-//! producer finishes it. Any number of subscribers can read it from any
-//! index and follow the new bodies, so a client that reconnects resumes
-//! where it stopped. It suits streamed output such as the chunks of an LLM
-//! response.
+//! A [`StreamBuffer`] holds the bodies appended to it, in order, until its
+//! producer finishes it. Any number of subscribers read it from any index.
+//! See the
+//! [stream buffers guide](https://www.wakuwaku.rs/en/docs/data/redis/stream-buffer).
 //!
 //! ```no_run
 //! use std::time::Duration;
@@ -105,10 +104,6 @@ return 1
 });
 
 /// Append-only arrays of bodies `B`, named by `N`.
-///
-/// Each name is one Redis stream. The body at index `i` is the entry
-/// `0-(i + 1)`, and a finished buffer ends with one more entry marking the
-/// end.
 ///
 /// Every append and the finish restart the TTL, so a buffer lives one TTL
 /// after its last change, finished or not. A subscriber that gets nothing

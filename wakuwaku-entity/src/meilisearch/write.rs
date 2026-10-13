@@ -1,14 +1,11 @@
 //! Writing documents and settings, and waiting for the tasks they enqueue.
 //!
-//! Meilisearch applies writes asynchronously. Each write query outputs the
-//! [`TaskInfo`] of its enqueued task; [`WaitTask`] waits until the task
-//! ran and fails if the task failed. Tasks of one index run in the order
+//! Meilisearch applies writes asynchronously: [`Upsert`], [`Delete`] and
+//! [`ApplySettings`] output the [`TaskInfo`] of their enqueued task, and
+//! [`WaitTask`] waits until it ran. Tasks of one index run in the order
 //! they were enqueued.
 //!
-//! Write queries have the effect `Write<I>` and can be hooked like any
-//! other write, but an index is a projection of another data source:
-//! hook the writes to that source instead, and update the index from there
-//! (see [`sync`](super::sync)).
+//! See the [writes guide](https://www.wakuwaku.rs/en/docs/data/meilisearch/writes).
 
 use crate::effect::io::Write;
 use crate::meilisearch::{MeiliSource, SearchIndex, effective_settings};

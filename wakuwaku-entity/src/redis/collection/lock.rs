@@ -4,16 +4,10 @@
 //! - [`RwLock`]: either one writer or any number of readers per name.
 //!
 //! Acquiring never waits: the query outputs a token if the lock was free
-//! and `None` otherwise, and the caller decides how to retry. A holder
-//! keeps the lock until it releases it or the lease (the lock's TTL)
-//! runs out; extend the lease to hold it longer. A holder whose lease ran
-//! out may have been overtaken, which [`LockToken::release`] and
-//! [`LockToken::extend`] report by outputting `false`.
-//!
-//! The lease is what keeps a crashed holder from blocking everyone, so it
-//! also bounds what the lock protects: work that may outlive the lease must
-//! extend it, and a stalled process may resume after losing the lock.
-//! Pass a fencing value to the protected resource when that matters.
+//! and `None` otherwise. A holder keeps the lock until it releases it or
+//! the lease (the lock's TTL) runs out. See the
+//! [locks guide](https://www.wakuwaku.rs/en/docs/data/redis/lock) for what a
+//! lease can and can't guarantee.
 //!
 //! ```no_run
 //! use std::time::Duration;
@@ -176,8 +170,6 @@ macro_rules! lock_collection {
 }
 
 /// A mutual exclusion lock per name `N`.
-///
-/// Each name is one string key holding the random token of its holder.
 pub struct Lock<N: ?Sized> {
     namespace: &'static str,
     ttl: Duration,
@@ -328,10 +320,8 @@ where
 
 /// A reader-writer lock per name `N`.
 ///
-/// Each name is two keys in one cluster hash slot: a string key holding the
-/// token of the writer, and a sorted set of reader tokens scored by the end
-/// of their lease. Readers don't wait for a writer that is trying to
-/// acquire, so a steady stream of readers can starve writers.
+/// Readers don't wait for a writer that is trying to acquire, so a steady
+/// stream of readers can starve writers.
 pub struct RwLock<N: ?Sized> {
     namespace: &'static str,
     ttl: Duration,

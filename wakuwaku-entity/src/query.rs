@@ -1,16 +1,11 @@
 //! Queries, data sources, and the [`Db`] handle that runs one on the other.
 //!
-//! A query is split in two traits:
-//!
-//! - [`Query`] says what it touches. It doesn't depend on where it runs, so
-//!   hooks and capability checks work the same for every data source.
-//! - [`Execute<S>`] says how it runs on the data source `S`, and how it can
-//!   fail. A query written in portable SQL may implement it for several
-//!   sources.
-//!
-//! A [`Db<S, C>`] owns a data source `S` and a capability `C`. It implements
-//! [`Processor<Q>`] for every query `Q` that runs on `S` and whose effect `C`
-//! [covers](Covers):
+//! - [`Query`]: what a query touches, its [`Effect`].
+//! - [`Execute<S>`]: how it runs on the data source `S`, and how it fails.
+//! - [`DataSource`]: something that runs queries.
+//! - [`Db<S, C>`]: a data source with a capability `C`. It implements
+//!   [`Processor<Q>`] for every query `Q` that runs on `S` and whose effect
+//!   `C` [covers](Covers):
 //!
 //! ```compile_fail
 //! # use wakuwaku_entity::{DataSource, Db, Entity, Execute, Query, ReadOnly, Write};
@@ -42,59 +37,7 @@
 //! }
 //! ```
 //!
-//! Handlers should stay generic over the handle, listing the queries they
-//! need (`D: Processor<FindUser> + Processor<DeletePost>`). The capability is
-//! then checked once, where the handle is wired in.
-//!
-//! A query that can refuse for reasons of its own (a lost optimistic-lock
-//! fence, a violated business rule, …) declares its own
-//! [`Error`](Execute::Error), which wraps the source's error:
-//!
-//! ```
-//! # use wakuwaku_entity::{DataSource, Entity, Execute, Query, Write};
-//! # struct Post;
-//! # impl Entity for Post {}
-//! # struct Memory;
-//! # #[derive(Debug)]
-//! # struct MemoryError;
-//! # impl DataSource for Memory {
-//! #     type Connection = u64;
-//! #     type Error = MemoryError;
-//! #     async fn run<Q: Execute<Self>>(&self, query: Q) -> Result<Q::Output, Q::Error> {
-//! #         query.execute(&mut 1).await
-//! #     }
-//! # }
-//! #[derive(Debug)]
-//! enum BumpError {
-//!     /// Someone else bumped the post first.
-//!     Conflict,
-//!     Source(MemoryError),
-//! }
-//!
-//! impl From<MemoryError> for BumpError {
-//!     fn from(error: MemoryError) -> Self {
-//!         Self::Source(error)
-//!     }
-//! }
-//!
-//! struct BumpPost { generation: u64 }
-//!
-//! impl Query for BumpPost {
-//!     type Effect = Write<Post>;
-//! }
-//!
-//! impl Execute<Memory> for BumpPost {
-//!     type Output = u64;
-//!     type Error = BumpError;
-//!     async fn execute(self, current: &mut u64) -> Result<u64, BumpError> {
-//!         if *current != self.generation {
-//!             return Err(BumpError::Conflict);
-//!         }
-//!         *current += 1;
-//!         Ok(*current)
-//!     }
-//! }
-//! ```
+//! See the [queries guide](https://www.wakuwaku.rs/en/docs/data/queries).
 
 use crate::effect::io::{Covers, Effect};
 use kanau::processor::Processor;
@@ -126,6 +69,56 @@ pub trait DataSource: Send + Sync + Sized {
 }
 
 /// How a query runs on the data source `S`.
+///
+/// A query that can refuse for reasons of its own (a lost optimistic-lock
+/// fence, a violated business rule, …) declares its own
+/// [`Error`](Execute::Error) wrapping the source's:
+///
+/// ```
+/// # use wakuwaku_entity::{DataSource, Entity, Execute, Query, Write};
+/// # struct Post;
+/// # impl Entity for Post {}
+/// # struct Memory;
+/// # #[derive(Debug)]
+/// # struct MemoryError;
+/// # impl DataSource for Memory {
+/// #     type Connection = u64;
+/// #     type Error = MemoryError;
+/// #     async fn run<Q: Execute<Self>>(&self, query: Q) -> Result<Q::Output, Q::Error> {
+/// #         query.execute(&mut 1).await
+/// #     }
+/// # }
+/// #[derive(Debug)]
+/// enum BumpError {
+///     /// Someone else bumped the post first.
+///     Conflict,
+///     Source(MemoryError),
+/// }
+///
+/// impl From<MemoryError> for BumpError {
+///     fn from(error: MemoryError) -> Self {
+///         Self::Source(error)
+///     }
+/// }
+///
+/// struct BumpPost { generation: u64 }
+///
+/// impl Query for BumpPost {
+///     type Effect = Write<Post>;
+/// }
+///
+/// impl Execute<Memory> for BumpPost {
+///     type Output = u64;
+///     type Error = BumpError;
+///     async fn execute(self, current: &mut u64) -> Result<u64, BumpError> {
+///         if *current != self.generation {
+///             return Err(BumpError::Conflict);
+///         }
+///         *current += 1;
+///         Ok(*current)
+///     }
+/// }
+/// ```
 pub trait Execute<S: DataSource>: Query {
     /// What the query returns.
     type Output: Send;

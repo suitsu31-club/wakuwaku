@@ -1,53 +1,21 @@
 # Wakuwaku Proof
 
-Proof-carrying validation.
+Proof-carrying validation: code that requires a validated value takes a
+[`Proven<T, P>`] (the subject plus evidence that `P` held) instead of a bare `T`.
 
-A [`Predicate`] is a proposition about a subject of type `T` that is decided at
-runtime, possibly with I/O (a database lookup, a remote call, …). Running it
-through [`prove`] either fails with a [`ValidateError`] or hands back a
-[`Proven<T, P>`]: the subject together with the evidence that `P` held.
+- [`Predicate`]: a proposition about a `T`, decided at runtime against a
+  [`ValidateContext`], possibly with I/O. [`prove`] runs it.
+- [`PureVerifier`]: a pure check as a function pointer, declarable as a
+  `static`; [`PureVerifier::prove`] runs it.
+- [`ValidateError`]: [`Deny`](ValidateError::Deny) with a [`DeniedReason`] when
+  the proposition is false, [`IoError`](ValidateError::IoError) when it could
+  not be decided.
+- [`And`] / [`Or`]: composition, evaluated in a [`CheckOrder`].
+- [`TermDerive`] / [`Proven::derive`]: Boolean-algebra laws that turn a proof
+  into a proof of an equivalent or weaker proposition without rechecking (rules
+  in [`boolean_algebra`]).
 
-Downstream code that requires a validated value takes `Proven<T, P>` instead of
-`T`, so "forgot to validate" becomes a type error rather than a runtime bug.
-
-A check that needs neither context nor I/O can instead be a [`PureVerifier`]: a
-function pointer `fn(&T) -> Result<P, ValidateError<Infallible>>` that can be
-declared as a `static` or `const`. [`PureVerifier::prove`] runs it and hands
-back a [`Proven<T, P>`] the same way.
-
-Predicates compose with [`And`] and [`Or`]. Both evaluate their operands in the
-[`CheckOrder`] passed to [`prove`], and forward that order to nested predicates.
-
-A proof converts into a proof of an equivalent or weaker proposition without
-rechecking through [`TermDerive`] / [`Proven::derive`], which implement the laws
-of Boolean algebra over [`And`] and [`Or`] (commutativity, associativity, …).
-
-# Evidence
-
-The predicate type is its own evidence: a successful check returns a value of
-the predicate type. A predicate with nothing to report is a unit struct; one that
-learns something while deciding (the row it looked up, a resolved id, …)
-carries it in its fields. [`And`] holds the evidence of both operands, and [`Or`]
-holds whichever operands are known to hold (`Left`, `Right` or `Both`).
-
-[`Proven::evidence`] gives the evidence by reference only. Each piece is wrapped
-in [`Evidence`], which is not `Clone`; only this crate's laws duplicate evidence,
-and only where the target needs the same proof twice, which then requires the
-evidence to be `Clone`.
-
-A predicate value on its own proves nothing: anyone can construct one, and
-calling [`Predicate::check`] directly returns evidence detached from any subject.
-Take `Proven<T, P>` in signatures, never a bare `P`.
-
-# Contexts and errors
-
-Every predicate names a [`ValidateContext`] (`Predicate::Ctx`) holding whatever
-it needs to decide (configuration, connection handles, …), plus the I/O error
-type that deciding may produce. A check has three outcomes:
-
-- `Ok(evidence)`: the proposition holds.
-- [`ValidateError::Deny`]: the proposition was decided and is false.
-- [`ValidateError::IoError`]: the proposition could not be decided.
+See the [validation guide](https://www.wakuwaku.rs/en/docs/validation).
 
 # Example
 
@@ -114,13 +82,13 @@ fn register(name: Proven<String, ValidUsername>) -> usize {
 #[tokio::main]
 async fn main() {
     let limits = Limits { max_len: 8 };
-    
+
     let Ok(name) = prove::<_, ValidUsername>("haruki".to_owned(), &limits, CheckOrder::Sequential).await
     else {
         unreachable!()
     };
     assert_eq!(register(name), 2);
-    
+
     let denied = prove::<_, ValidUsername>(String::new(), &limits, CheckOrder::Parallel).await;
     assert!(matches!(denied, Err(ValidateError::Deny(reason)) if reason == EMPTY));
 }

@@ -458,11 +458,10 @@ where
 /// the method-call form. The derived proof is about the same subject at the same
 /// moment as the original, with the same caveats (see [`Proven`]).
 ///
-/// `R` names the law that justifies the step. Without it, laws would be overlapping
-/// impls of one trait: [`Commute`] and [`Associate`] both rewrite `(A ∧ A) ∧ A` into
-/// `A ∧ (A ∧ A)`, which Rust rejects. `R` is normally inferred from the source and
-/// target types; when more than one law fits, as in that example, name it:
-/// `proof.derive::<_, Associate>()`.
+/// `R` names the law that justifies the step, so laws do not overlap as impls. It is
+/// normally inferred from the source and target types; when more than one law fits
+/// (both [`Commute`] and [`Associate`] rewrite `(A ∧ A) ∧ A` into `A ∧ (A ∧ A)`), name
+/// it: `proof.derive::<_, Associate>()`.
 ///
 /// # Provided laws
 ///

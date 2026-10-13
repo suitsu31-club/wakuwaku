@@ -52,9 +52,10 @@
 //! An item lives under `@@wakuwaku-entity:<kind>:<namespace>:<name>`, where
 //! `<kind>` is the type of the structure. An item made of several keys
 //! wraps `<namespace>:<name>` in braces and appends a suffix to each key, so
-//! all of its keys share one cluster hash slot. The namespace separates
-//! structures of the same type: two structures of the same kind with the
-//! same namespace share their keys, so give each one its own namespace.
+//! all of its keys share one cluster hash slot. Two structures of the same
+//! kind with the same namespace share their keys.
+//!
+//! See the [Redis guide](https://www.wakuwaku.rs/en/docs/data/redis).
 
 pub mod collection;
 pub mod dynamic;

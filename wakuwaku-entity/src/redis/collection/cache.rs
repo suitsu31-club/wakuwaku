@@ -4,7 +4,8 @@
 //! - [`HashedCache`] also stores the BLAKE3 hash of each body, so a reader
 //!   that already holds a copy can check it without downloading the body.
 //!
-//! Bodies are any [`MessageSer`] / [`MessageDe`] type.
+//! Bodies are any [`MessageSer`] / [`MessageDe`] type. See the
+//! [caches guide](https://www.wakuwaku.rs/en/docs/data/redis/cache).
 //!
 //! ```no_run
 //! use std::time::Duration;
@@ -226,10 +227,8 @@ where
 }
 
 /// Like [`Cache`], but each item also holds the BLAKE3 hash of its
-/// serialized body.
-///
-/// An item is a Redis hash with the fields `body` and `hash`, written
-/// together. [`hash`](Self::hash) and [`get_if_changed`](Self::get_if_changed)
+/// serialized body, written together with it.
+/// [`hash`](Self::hash) and [`get_if_changed`](Self::get_if_changed)
 /// compare a copy against the stored body by transferring the 32-byte hash
 /// only.
 pub struct HashedCache<N: ?Sized, B> {

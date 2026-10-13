@@ -1,14 +1,16 @@
 //! Compile-time, type-indexed service registry.
 //!
-//! [`ServiceBuilder`] stores services in a heterogeneous, singly linked list
-//! built at the type level. Each [`push`](ServiceBuilder::push) wraps the
-//! current builder in a new node, and [`provide`](ServiceBuilder::provide)
-//! looks a service up by its type. Lookup is resolved entirely by the trait
-//! solver: there is no `Any`, no downcasting, and no runtime map, so asking
-//! for a service that was never registered is a compile error rather than a
-//! panic.
+//! [`ServiceBuilder`] is a type-level list of registered services:
+//! [`push`](ServiceBuilder::push) adds one, [`provide`](ServiceBuilder::provide)
+//! borrows one by its type, and the lookup is the trait bound [`ProvideAt`],
+//! resolved by the compiler at a position ([`Here`], [`There`]). Asking for a
+//! service that was never registered is a compile error.
 //!
-//! # Example
+//! Services can also be built from registered ones and pushed with
+//! [`construct_subservice`](ServiceBuilder::construct_subservice) and
+//! [`compose_subservice`](ServiceBuilder::compose_subservice). Components are
+//! registered with `cron_job`, `grpc_service`, `iggy_consumer` and their
+//! `compose_*` counterparts.
 //!
 //! ```
 //! use wakuwaku::services::builder::ServiceBuilder;
@@ -17,12 +19,8 @@
 //! struct Counter(u32);
 //!
 //! let services = ServiceBuilder::new(Config { name: "api" }).push(Counter(7));
-//!
-//! // The position index is inferred with `_`.
-//! let config: &Config = services.provide::<Config, _>();
-//! let counter: &Counter = services.provide::<Counter, _>();
-//! assert_eq!(config.name, "api");
-//! assert_eq!(counter.0, 7);
+//! assert_eq!(services.provide::<Config, _>().name, "api");
+//! assert_eq!(services.provide::<Counter, _>().0, 7);
 //! ```
 //!
 //! Requesting an unregistered type fails to compile:
@@ -34,19 +32,7 @@
 //! let _: &String = services.provide::<String, _>();
 //! ```
 //!
-//! # Duplicate types
-//!
-//! When the same type is registered more than once, the index cannot be
-//! inferred and must be spelled out. [`Here`] is the most recently pushed
-//! service; each [`There`] steps one node further back:
-//!
-//! ```
-//! use wakuwaku::services::builder::{Here, ServiceBuilder, There};
-//!
-//! let services = ServiceBuilder::new(1u32).push(2u32);
-//! assert_eq!(*services.provide::<u32, Here>(), 2);
-//! assert_eq!(*services.provide::<u32, There<Here>>(), 1);
-//! ```
+//! See the [service builder guide](https://www.wakuwaku.rs/en/docs/core/service-builder).
 
 use crate::services::ServiceCreation;
 use crate::services::cron_job::{CronJob, CronRegisterCenter, CronRegisterCenterBuilder};
@@ -57,7 +43,7 @@ use std::marker::PhantomData;
 /// `T` is the service stored at this node and `Chain` is the rest of the list:
 /// either another `ServiceBuilder` or `()` for the first registered service.
 /// Construct one with [`ServiceBuilder::new`] and extend it with
-/// [`ServiceBuilder::push`]. See the [module documentation](self) for usage.
+/// [`ServiceBuilder::push`].
 #[derive(Clone)]
 pub struct ServiceBuilder<T, Chain = ()> {
     this: T,
@@ -81,8 +67,17 @@ impl<Head, Chain> ServiceBuilder<Head, Chain> {
     ///
     /// `I` is the service's position in the list. Pass `_` to let the
     /// compiler infer it; this works whenever `T` is registered exactly once.
-    /// If `T` is registered several times, name the position explicitly with
-    /// [`Here`] / [`There`].
+    /// If `T` is registered several times, name the position explicitly:
+    /// [`Here`] is the most recently pushed service, and each [`There`] steps
+    /// one node further back.
+    ///
+    /// ```
+    /// use wakuwaku::services::builder::{Here, ServiceBuilder, There};
+    ///
+    /// let services = ServiceBuilder::new(1u32).push(2u32);
+    /// assert_eq!(*services.provide::<u32, Here>(), 2);
+    /// assert_eq!(*services.provide::<u32, There<Here>>(), 1);
+    /// ```
     pub fn provide<T, I>(&self) -> &T
     where
         Self: ProvideAt<T, I>,
@@ -133,12 +128,10 @@ impl<Head, Chain> ServiceBuilder<Head, Chain> {
 
     /// Build a service from any registered services and register it.
     ///
-    /// `composer` borrows the whole builder, so it can
-    /// [`provide`](Self::provide) as many registered services as it needs.
-    /// Use this when a service needs a combination of dependencies that no
-    /// single registered value holds. The result is pushed, so it is found at
-    /// [`Here`] and can itself be the dependency of the components registered
-    /// after it.
+    /// `composer` borrows the builder, so it can [`provide`](Self::provide)
+    /// as many registered services as it needs. The result is pushed, so it
+    /// is found at [`Here`] and can be the dependency of the components
+    /// registered after it.
     ///
     /// ```
     /// use wakuwaku::services::builder::ServiceBuilder;
@@ -190,16 +183,14 @@ impl<Head, Chain> ServiceBuilder<Head, Chain> {
         CronRegisterCenterBuilder::new(self, register_center)
     }
 
-    /// Build a cron job from any registered services and start a job list.
+    /// Build a cron job by a closure and start a job list.
     ///
-    /// The [`cron_job`](Self::cron_job) counterpart of
-    /// [`compose_subservice`](Self::compose_subservice): `composer` borrows
-    /// the whole builder, so it can [`provide`](Self::provide) as many
-    /// registered services as it needs, or ignore it and move in a job that
-    /// was built by hand. The job needs no [`ServiceCreation`] impl and is
-    /// not registered as a service. It becomes the first entry of a new
-    /// [`CronRegisterCenter`]; chain more jobs on the returned builder, then
-    /// call `start` or `into_parts`.
+    /// `composer` borrows the builder, so it can [`provide`](Self::provide)
+    /// as many registered services as it needs, or ignore it and move in a
+    /// job built by hand. The job needs no [`ServiceCreation`] impl, is not
+    /// registered as a service, and is not cloned. It becomes the first entry
+    /// of a new [`CronRegisterCenter`]; chain more jobs on the returned
+    /// builder, then call `start` or `into_parts`.
     ///
     /// ```
     /// use std::time::Duration;
@@ -276,17 +267,14 @@ impl<Head, Chain> ServiceBuilder<Head, Chain> {
         super::iggy_consumer::IggyConsumerRegisterCenterBuilder::new(self, register_center)
     }
 
-    /// Build an Iggy event handler from any registered services and start a
-    /// handler list.
+    /// Build an Iggy event handler by a closure and start a handler list.
     ///
-    /// The [`iggy_consumer`](Self::iggy_consumer) counterpart of
-    /// [`compose_subservice`](Self::compose_subservice): `composer` borrows
-    /// the whole builder, so it can [`provide`](Self::provide) as many
-    /// registered services as it needs, or ignore it and move in a handler
-    /// that was built by hand. It returns the handler in the [`Arc`] the
-    /// handler list stores, so an `Arc` that is shared elsewhere can be
-    /// registered as is. The handler needs no [`ServiceCreation`] impl and is
-    /// not registered as a service. It becomes the first entry of a new
+    /// `composer` borrows the builder, so it can [`provide`](Self::provide)
+    /// as many registered services as it needs, or ignore it and move in a
+    /// handler built by hand. It returns the handler in the [`Arc`] the
+    /// handler list stores, so an `Arc` shared elsewhere can be registered as
+    /// is. The handler needs no [`ServiceCreation`] impl and is not registered
+    /// as a service. It becomes the first entry of a new
     /// [`IggyConsumerRegisterCenter`](wakuwaku_iggy::IggyConsumerRegisterCenter);
     /// chain more handlers on the returned builder, then call `start` or
     /// `into_parts`.
@@ -327,8 +315,8 @@ impl<Head, Chain> ServiceBuilder<Head, Chain> {
     /// Write a generated server type as `XxxServer<_>`; its type parameter is
     /// inferred from `ServiceImpl`. The position is inferred with `_` when the
     /// dependency's type is registered exactly once. See the
-    /// [`grpc_service` module documentation](super::grpc_service#building-servers-from-a-servicebuilder)
-    /// for an example.
+    /// [`grpc_service` module documentation](super::grpc_service) for an
+    /// example.
     #[cfg(feature = "grpc")]
     pub fn grpc_service<Server, ServiceImpl, Position>(
         self,
@@ -346,23 +334,20 @@ impl<Head, Chain> ServiceBuilder<Head, Chain> {
         super::grpc_service::GrpcServiceRegisterCenterBuilder::new(self, register_center)
     }
 
-    /// Build a gRPC server from any registered services and start a server
-    /// list.
+    /// Build a gRPC server by a closure and start a server list.
     ///
-    /// The [`grpc_service`](Self::grpc_service) counterpart of
-    /// [`compose_subservice`](Self::compose_subservice): `composer` borrows
-    /// the whole builder, so it can [`provide`](Self::provide) as many
-    /// registered services as it needs, or ignore it and move in a server
-    /// whose implementation was assembled by hand. It returns the finished
-    /// server (for tonic-generated servers, `XxxServer::new(implementation)`),
-    /// whose type is inferred. The implementation needs no
-    /// [`ServiceCreation`] impl and is not registered as a service. The
-    /// server becomes the first entry of a new
+    /// `composer` borrows the builder, so it can [`provide`](Self::provide)
+    /// as many registered services as it needs, or ignore it and move in a
+    /// server assembled by hand. It returns the finished server (for
+    /// tonic-generated servers, `XxxServer::new(implementation)`), whose type
+    /// is inferred. The implementation needs no [`ServiceCreation`] impl, is
+    /// not registered as a service, and is not cloned. The server becomes the
+    /// first entry of a new
     /// [`GrpcServiceRegisterCenter`](super::grpc_service::GrpcServiceRegisterCenter);
     /// chain more servers on the returned builder, then call
     /// `into_router_fn` or `into_parts`. See the
-    /// [`grpc_service` module documentation](super::grpc_service#building-servers-from-a-servicebuilder)
-    /// for an example.
+    /// [`grpc_service` module documentation](super::grpc_service) for an
+    /// example.
     #[cfg(feature = "grpc")]
     pub fn compose_grpc_service<Server>(
         self,

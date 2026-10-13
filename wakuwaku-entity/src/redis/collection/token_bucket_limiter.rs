@@ -1,9 +1,9 @@
 //! A rate limiter based on token buckets.
 //!
 //! Each name has a bucket holding up to `capacity` tokens, refilled
-//! continuously at a fixed [`Rate`]. A request takes some tokens and is
-//! denied if the bucket holds fewer. A bucket starts full, and its key
-//! expires once it would be full again, so idle names cost nothing.
+//! continuously at a fixed [`Rate`] by the server clock. See the
+//! [rate limiter guide](https://www.wakuwaku.rs/en/docs/data/redis/rate-limiter)
+//! for the model.
 //!
 //! ```no_run
 //! use std::time::Duration;
@@ -128,8 +128,7 @@ impl Rate {
 
 /// A token bucket per name `N`.
 ///
-/// Each name is a Redis hash with the fields `tokens` and `ts` (the server
-/// time of the last update), updated by a Lua script.
+/// A bucket starts full, and its key expires once it would be full again.
 pub struct TokenBucket<N: ?Sized> {
     namespace: &'static str,
     capacity: u64,

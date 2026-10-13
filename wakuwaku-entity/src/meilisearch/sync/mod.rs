@@ -1,52 +1,17 @@
 //! Keeping an index in sync with its source of truth.
 //!
-//! An index holds a projection of data that lives in another data source.
-//! Keeping the two in sync goes wrong in four ways:
-//!
-//! | Problem | Cause | Remedy | Here |
-//! |---|---|---|---|
-//! | Silent failure | Writes only enqueue a task; it fails later | Wait for the task | [`Indexer`] waits by default |
-//! | Stale overwrite | Two updates of one document race; the older lands last | Reload the latest state by key, one worker per key | [`Indexer`] reloads; partition your delivery by key |
-//! | Lost update | A crash or an outage between the commit and the index write | A durable log of changes (outbox, CDC) | Your delivery |
-//! | Drift | Bugs, missed changes, changed settings | Rebuild the index from scratch | [`rebuild()`] |
-//!
-//! This module provides the pieces that are the same everywhere. How
-//! changes travel from the source to the [`Indexer`] depends on your
-//! infrastructure and stays yours.
-//!
-//! # Pieces
-//!
-//! - A [`Projection`] says how to load rows of the source by key and turn
-//!   each into a document, or into nothing if the row shouldn't be
-//!   searchable.
-//! - The [`Indexer`] is a [`Processor`](kanau::processor::Processor) of
-//!   anything that converts into [`Reindex`]: it reloads the given keys
-//!   from the source, writes their documents, and deletes the documents of
-//!   keys that are gone or project to nothing. It never trusts the content
-//!   of a change, only its keys, so a change delivered twice or late does
-//!   no harm.
+//! - A [`Projection`] loads rows of the source by key and turns each into a
+//!   document, or into nothing if it shouldn't be searchable.
+//! - The [`Indexer`] processes anything that converts into a [`Reindex`]:
+//!   it reloads those keys and writes or deletes their documents. Make it
+//!   the hook of an [`AfterWrite`](crate::AfterWrite) or of a
+//!   `sqlx::transaction::hook::AfterTransaction`, or feed it from a durable
+//!   log.
 //! - [`rebuild()`] fills a fresh copy of the index from a [`Scan`] of the
 //!   whole source, then swaps it with the live index.
 //!
-//! # Delivering changes
-//!
-//! Anything that can call a processor works:
-//!
-//! - **A write hook.** Wrap the source's handle in
-//!   [`AfterWrite`](crate::AfterWrite) with the indexer as its hook, and
-//!   convert the query's change into a [`Reindex`]. For sqlx transactions,
-//!   hook `sqlx::transaction::hook::AfterTransaction` instead. Simple, but
-//!   a crash after the commit loses the update. Use
-//!   [`Indexer::without_waiting`] so requests don't wait for Meilisearch.
-//! - **A durable log.** Write an outbox row in the same transaction as the
-//!   change, relay it through a queue, and consume it with the indexer.
-//!   Partition the queue by key so that one key is reindexed by one worker
-//!   at a time, and acknowledge a message only once the indexer
-//!   succeeded.
-//!
-//! Either way, rebuild periodically: it repairs whatever the delivery
-//! missed. Starting with a hook and a nightly rebuild is reasonable; the
-//! index is then at most a day off after a failure.
+//! How changes travel from the source to the indexer is up to you. See the
+//! [sync guide](https://www.wakuwaku.rs/en/docs/data/meilisearch/sync).
 
 pub mod hook;
 pub mod rebuild;

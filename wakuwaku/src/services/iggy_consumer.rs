@@ -1,32 +1,19 @@
 //! Building Iggy event handlers from a [`ServiceBuilder`].
 //!
-//! Event handlers usually need shared dependencies such as a database pool
-//! or an HTTP client. Register the dependencies in a service builder and
-//! build the handlers from it with one of:
+//! - [`ServiceBuilder::iggy_consumer`] creates a handler that implements
+//!   [`ServiceCreation`] from one registered dependency.
+//! - [`ServiceBuilder::compose_iggy_consumer`] takes any handler, built by a
+//!   closure that borrows the service builder.
 //!
-//! - [`ServiceBuilder::iggy_consumer`], for a handler that implements
-//!   [`ServiceCreation`]: it is created from one registered dependency,
-//!   which is cloned out of the service builder, and wrapped in an [`Arc`].
-//! - [`ServiceBuilder::compose_iggy_consumer`], for any other handler: a
-//!   closure borrows the service builder, takes whatever it needs from it
-//!   (or nothing, for a handler set up beforehand), and returns the handler
-//!   in an [`Arc`]. The handler needs no `ServiceCreation` impl and is not
-//!   registered in the service builder.
+//! Both return an [`IggyConsumerRegisterCenterBuilder`], which chains more of
+//! either in any order and ends with
+//! [`start`](IggyConsumerRegisterCenterBuilder::start) (returning the
+//! [`ConsumerRuntime`]) or
+//! [`into_parts`](IggyConsumerRegisterCenterBuilder::into_parts) (returning
+//! the unstarted [`IggyConsumerRegisterCenter`]). Each handler is created when
+//! it is registered.
 //!
-//! Both return an [`IggyConsumerRegisterCenterBuilder`], which chains more
-//! [`iggy_consumer`](IggyConsumerRegisterCenterBuilder::iggy_consumer) and
-//! [`compose_iggy_consumer`](IggyConsumerRegisterCenterBuilder::compose_iggy_consumer)
-//! calls in any order and ends with either:
-//!
-//! - [`start`](IggyConsumerRegisterCenterBuilder::start), which starts
-//!   consuming and gives back the service builder together with the
-//!   [`ConsumerRuntime`], or
-//! - [`into_parts`](IggyConsumerRegisterCenterBuilder::into_parts), which
-//!   returns the service builder and the unstarted
-//!   [`IggyConsumerRegisterCenter`], so you can start it later.
-//!
-//! Each handler is created right away, when it is registered. See the
-//! [`wakuwaku_iggy`] documentation for how events are consumed.
+//! See the [consuming guide](https://www.wakuwaku.rs/en/docs/events/consuming).
 //!
 //! # Example
 //!
@@ -121,17 +108,9 @@
 //! }
 //! ```
 //!
-//! The event must be named when a handler handles more than one event, e.g.
-//! `.iggy_consumer::<MyHandler, MyEvent, _>()`. The position must be named
-//! with [`Here`](super::builder::Here) / [`There`](super::builder::There)
-//! when the dependency's type is registered more than once.
-//!
-//! A handler that needs several registered services, or that is set up by
-//! hand, is registered with
-//! [`compose_iggy_consumer`](ServiceBuilder::compose_iggy_consumer) instead,
-//! e.g. `.compose_iggy_consumer(|s| Arc::new(AuditLog { db:
-//! s.provide::<Db, _>().clone(), http }))`; it needs no [`ServiceCreation`]
-//! impl.
+//! A handler built from several services is registered with a closure
+//! instead, e.g. `.compose_iggy_consumer(|s| Arc::new(AuditLog { db:
+//! s.provide::<Db, _>().clone(), mailer: s.provide::<Mailer, _>().clone() }))`.
 
 use crate::services::ServiceCreation;
 use crate::services::builder::{ProvideAt, ServiceBuilder, ServiceBuilderPosition};

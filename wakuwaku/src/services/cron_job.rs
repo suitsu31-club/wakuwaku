@@ -1,72 +1,13 @@
 //! Jobs that run locally on an interval.
 //!
-//! A [`CronJob`] is a [`Processor`] of [`CronTick`]s with a fixed
-//! [`INTERVAL`](CronJob::INTERVAL), a [`CronJobInterval`]. Cron jobs are
-//! usually scans (expire stale rows, retry stuck work, reconcile an index),
-//! so the interval is a constant of the job type rather than a calendar
-//! expression.
+//! A [`CronJob`] is a [`Processor`] of [`CronTick`]s whose
+//! [`INTERVAL`](CronJob::INTERVAL), a [`CronJobInterval`], sets its
+//! schedule. Register jobs with [`ServiceBuilder::cron_job`] or
+//! [`ServiceBuilder::compose_cron_job`] (or fill a [`CronRegisterCenter`] by
+//! hand) and [`start`](CronRegisterCenter::start) them to get a
+//! [`CronRuntime`].
 //!
-//! [`CronRegisterCenter`] collects jobs in a type-level linked list, the same
-//! way [`ServiceBuilder`] does; there is no boxing and no dynamic dispatch.
-//! [`start`](CronRegisterCenter::start) spawns one Tokio task per job and
-//! returns a [`CronRuntime`].
-//!
-//! # Schedule
-//!
-//! Every job's first run is when [`start`](CronRegisterCenter::start) was
-//! called. The variant of [`CronJob::INTERVAL`] decides when the next runs
-//! start, for a duration `d`:
-//!
-//! | `INTERVAL`        | Next run starts                                         | Runs overlap |
-//! |-------------------|---------------------------------------------------------|--------------|
-//! | `AfterFinish(d)`  | `d` after the previous run finished                     | no           |
-//! | `AtLeast(d)`      | `d` after the previous run started, or as soon as it finished if that is later | no |
-//! | `AfterStart(d)`   | on the grid `start + k * d`                             | yes          |
-//!
-//! - With `AfterFinish` and `AtLeast`, two consecutive runs start at least
-//!   `d` apart on the monotonic clock, so their [`fired_at`](CronTick::fired_at)
-//!   are at least `d` apart unless the wall clock is adjusted in between.
-//! - With `AfterStart`, runs start on the grid however long they take; a run
-//!   that takes longer than `d` runs concurrently with the next ones. Grid
-//!   points missed because the runtime was blocked are skipped rather than
-//!   run in a burst. `fired_at` includes the wake-up delay, so consecutive
-//!   `fired_at` can be slightly less than `d` apart.
-//! - A run that returns an error, or panics, is logged with [`tracing`] and
-//!   the job keeps its schedule.
-//!
-//! A zero duration has no schedule. Registering such a job fails to compile;
-//! the check runs when the registration is instantiated, so `cargo build`
-//! reports it and `cargo check` alone does not:
-//!
-//! ```compile_fail
-//! use std::time::Duration;
-//! use wakuwaku::deps::kanau::processor::Processor;
-//! use wakuwaku::services::cron_job::{CronJob, CronJobInterval, CronRegisterCenter, CronTick};
-//!
-//! struct Busy;
-//! impl Processor<CronTick> for Busy {
-//!     type Output = ();
-//!     type Error = std::convert::Infallible;
-//!     async fn process(&self, _: CronTick) -> Result<(), Self::Error> { Ok(()) }
-//! }
-//! impl CronJob for Busy {
-//!     const INTERVAL: CronJobInterval = CronJobInterval::AtLeast(Duration::ZERO);
-//! }
-//!
-//! let _ = CronRegisterCenter::new(Busy);
-//! ```
-//!
-//! # Several replicas
-//!
-//! Every process that starts a job runs it, so with several replicas of a
-//! service each run happens once per replica. Make the job idempotent, or
-//! partition the work, for example by having each replica scan only its
-//! share of the keys, or by taking a lock such as
-//! `wakuwaku_entity::redis::collection::lock::Lock` inside the run. To run
-//! each pass once across replicas, a run can claim it in shared storage with
-//! a fence such as "the last claimed run fired at least `d` before this
-//! tick's `fired_at`"; use `AfterFinish` or `AtLeast` for such a job, since
-//! `AfterStart` runs can fire slightly less than `d` apart.
+//! See the [cron jobs guide](https://www.wakuwaku.rs/en/docs/services/cron-jobs).
 //!
 //! # Example
 //!
@@ -120,14 +61,6 @@
 //! # assert_eq!(store.expired.load(Ordering::Relaxed), 1);
 //! # }
 //! ```
-//!
-//! A job that needs several registered services, or that is built by hand,
-//! is registered with
-//! [`compose_cron_job`](ServiceBuilder::compose_cron_job) instead; it needs
-//! no [`ServiceCreation`] impl.
-//!
-//! A job is unit-tested by calling [`process`](Processor::process) with a
-//! [`CronTick`] built by hand; no runtime is needed.
 
 use crate::services::ServiceCreation;
 use crate::services::builder::{ProvideAt, ServiceBuilder, ServiceBuilderPosition};
@@ -147,31 +80,73 @@ use tracing::Instrument;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CronTick {
     /// Number of earlier runs of this job since its runtime started: `0` for
-    /// the first run.
+    /// the first run. Grid points skipped by
+    /// [`AfterStart`](CronJobInterval::AfterStart) are not counted.
     pub run: u64,
     /// Wall-clock time when the run started.
     pub fired_at: SystemTime,
 }
 
-/// How the runs of a [`CronJob`] are spaced. See the
-/// [module documentation](self#schedule) for the schedule.
+/// How the runs of a [`CronJob`] are spaced, for a duration `d`.
 ///
-/// The duration must not be zero; registering a job with a zero duration
-/// fails to build.
+/// Every job's first run starts when [`CronRegisterCenter::start`] is
+/// called. After that:
+///
+/// | Variant          | Next run starts                                                    | Runs overlap |
+/// |------------------|--------------------------------------------------------------------|--------------|
+/// | `AfterFinish(d)` | `d` after the previous run finished                                | no           |
+/// | `AtLeast(d)`     | `d` after the previous run started, or when it finished if later   | no           |
+/// | `AfterStart(d)`  | on the grid `start + k * d`, however long the previous run takes   | yes          |
+///
+/// A run that returns an error, or panics, is logged with [`tracing`] and
+/// the job keeps its schedule.
+///
+/// # Zero duration
+///
+/// `d` must not be zero. Registering a job with a zero duration
+/// ([`CronRegisterCenter::new`], [`CronRegisterCenter::push`], and the
+/// builder methods that call them) fails to compile. The check runs when the
+/// registration is instantiated, so `cargo build` reports it and
+/// `cargo check` does not:
+///
+/// ```compile_fail
+/// # use std::time::Duration;
+/// # use wakuwaku::deps::kanau::processor::Processor;
+/// # use wakuwaku::services::cron_job::{CronJob, CronJobInterval, CronRegisterCenter, CronTick};
+/// # struct Busy;
+/// # impl Processor<CronTick> for Busy {
+/// #     type Output = ();
+/// #     type Error = std::convert::Infallible;
+/// #     async fn process(&self, _: CronTick) -> Result<(), Self::Error> { Ok(()) }
+/// # }
+/// impl CronJob for Busy {
+///     const INTERVAL: CronJobInterval = CronJobInterval::AtLeast(Duration::ZERO);
+/// }
+///
+/// let _ = CronRegisterCenter::new(Busy); // error: CronJob::INTERVAL must not be zero
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CronJobInterval {
     /// Time from the end of a run to the start of the next one. Runs never
-    /// overlap.
+    /// overlap, and consecutive starts are `d` plus the run time apart.
     AfterFinish(Duration),
 
     /// Minimum time from the start of a run to the start of the next one.
     /// Runs never overlap: a run that takes longer is followed by the next
     /// one as soon as it finishes, so consecutive starts are
-    /// `max(duration, run time)` apart.
+    /// `max(d, run time)` apart on the monotonic clock, and their
+    /// [`fired_at`](CronTick::fired_at) are at least `d` apart unless the
+    /// wall clock is adjusted in between.
     AtLeast(Duration),
 
-    /// Time between the starts of consecutive runs, on a fixed grid. A run
-    /// that takes longer runs concurrently with the next ones.
+    /// Time between the starts of consecutive runs, on the fixed grid
+    /// `start + k * d`. Each run is spawned in its own task, so a run that
+    /// takes longer than `d` runs concurrently with the next ones.
+    ///
+    /// Grid points missed because the runtime was blocked are skipped rather
+    /// than run in a burst. [`fired_at`](CronTick::fired_at) includes the
+    /// wake-up delay, so consecutive `fired_at` can be slightly less than `d`
+    /// apart.
     AfterStart(Duration),
 }
 
@@ -190,8 +165,8 @@ impl CronJobInterval {
 /// [`INTERVAL`](Self::INTERVAL).
 ///
 /// The job itself is a [`Processor`] of [`CronTick`]s that outputs `()`.
-/// Returned errors are logged with [`tracing`] and don't stop the job. See
-/// the [module documentation](self) for the schedule.
+/// Returned errors and panics are logged with [`tracing`] and don't stop the
+/// job.
 pub trait CronJob:
     Processor<CronTick, Output = (), Error: Display> + Send + Sync + 'static
 {

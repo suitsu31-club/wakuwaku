@@ -1,38 +1,14 @@
 //! Typed filters and sorts.
 //!
-//! A [`Filter`] is a tree of conditions on [`Field`]s. Each index lists its
-//! filterable fields as an enum, so a filter can only name an attribute the
-//! index allows. Values are quoted and escaped when the filter is rendered,
-//! so no value can change the structure of the expression. Filters
-//! deserialize from JSON, which makes them safe to accept from end users:
+//! A [`Filter`] is a tree of conditions on the [`Field`]s of one index, and
+//! a [`Sort`] names a field and an [`Order`]. Both deserialize from client
+//! JSON and can only name the fields their index allows:
 //!
 //! ```json
 //! {"and": [{"eq": ["author", 7]}, {"not": {"in": ["status", ["draft", "deleted"]]}}]}
 //! ```
 //!
-//! # Raw expressions
-//!
-//! [`Filter::DangerouslyRaw`] holds a filter expression written in
-//! Meilisearch's own syntax, rendered as is. It can't be deserialized, so a
-//! client can't send one, but the expression itself is trusted completely:
-//!
-//! - **Never build it from untrusted input.** `format!("author = {name}")`
-//!   with the name `x OR author EXISTS` matches every document. That is
-//!   injection, as with SQL.
-//! - **Parentheses don't contain it.** `AND` binds tighter than `OR`, so
-//!   `(scope) AND (a = 1) OR (b = 2)`, built from the raw text
-//!   `a = 1) OR (b = 2`, matches `b = 2` outside the scope. A raw node
-//!   can rewrite the meaning of the whole filter it is part of.
-//! - **It reaches further than the fields of the index.** It may name any
-//!   filterable attribute, and `_foreign()` filters on documents of joined
-//!   indexes.
-//!
-//! What a raw node can't do is escape a separate filter. Scopes, in
-//! [`Search`](super::search::Search) and in tenant tokens, are sent to
-//! Meilisearch as their own element of an array of filters, and Meilisearch
-//! parses each element on its own before combining them with `AND`. A raw
-//! node in the client's part of a search can't lift the scope; a raw node
-//! inside the scope can still make the scope match everything.
+//! See the [search guide](https://www.wakuwaku.rs/en/docs/data/meilisearch/search).
 
 use serde::{Deserialize, Serialize};
 use std::fmt::{Debug, Write as _};
@@ -134,10 +110,21 @@ pub enum Filter<F> {
     ///
     /// # Danger
     ///
-    /// The expression is trusted completely. Never build it from untrusted
-    /// input, and don't count on parentheses to contain it: see the
-    /// [module documentation](self). Clients can't send it; it is skipped
-    /// by serde.
+    /// The expression is trusted completely:
+    ///
+    /// - Never build it from untrusted input: a value spliced into it can
+    ///   change the structure of the expression.
+    /// - Parentheses don't contain it. `AND` binds tighter than `OR`, so the
+    ///   raw text `a = 1) OR (b = 2`, rendered inside `(scope) AND (…)`,
+    ///   matches `b = 2` outside the scope.
+    /// - It may name any filterable attribute of the index, not only the
+    ///   fields of `F`, and use `_foreign()`.
+    ///
+    /// It can't lift a scope sent as a separate filter (the scope of a
+    /// [`Search`](super::search::Search) or of a tenant token), but a raw
+    /// node inside a scope can make the scope match everything.
+    ///
+    /// Clients can't send it: it is skipped by serde.
     #[serde(skip)]
     DangerouslyRaw(String),
 }
@@ -157,18 +144,22 @@ pub enum FilterError {
 }
 
 impl<F: Field> Filter<F> {
-    /// A filter expression in Meilisearch's syntax, rendered as is.
-    ///
-    /// # Danger
-    ///
-    /// The expression is trusted completely. Never build it from untrusted
-    /// input, and don't count on parentheses to contain it: see the
-    /// [module documentation](self).
+    /// A [`Filter::DangerouslyRaw`] of `expression`. Read its danger notes
+    /// first.
     pub fn dangerously_raw(expression: impl Into<String>) -> Self {
         Self::DangerouslyRaw(expression.into())
     }
 
     /// The filter as a Meilisearch filter expression.
+    ///
+    /// Every attribute and value is quoted, with `"` and `\` escaped, so no
+    /// value can change the structure of the expression. Each member of a
+    /// group and the operand of a negation is parenthesized.
+    ///
+    /// # Errors
+    ///
+    /// [`FilterError`] for an empty group, a non-finite float, or nesting
+    /// deeper than [`MAX_DEPTH`].
     pub fn render(&self) -> Result<String, FilterError> {
         let mut out = String::new();
         self.write(&mut out, 0)?;

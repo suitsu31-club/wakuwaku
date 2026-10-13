@@ -1,4 +1,4 @@
-//! Typed data structures stored in Redis.
+//! Typed data structures stored in Redis, queried on demand.
 //!
 //! Each collection is a small `Copy` value, usually a `const`, generic over
 //! the [`Name`](super::Name) of its items and, for caches, the body type. Its
@@ -20,9 +20,7 @@
 //! use wakuwaku_entity::{CanRead, CanWrite};
 //!
 //! struct SessionToken(String);
-//! struct Session {
-//!     user: u64,
-//! }
+//! struct Session;
 //!
 //! /// Reads every cache, writes only the session cache.
 //! enum Gateway {}
@@ -30,11 +28,9 @@
 //! impl CanWrite<Cache<SessionToken, Session>> for Gateway {}
 //! ```
 //!
-//! Items live under the [keys](super#keys) shared by every Redis structure.
-//!
 //! Locks and the rate limiter read the server clock with `TIME` inside Lua
 //! scripts, which needs effects replication of scripts (the default since
-//! Redis 5).
+//! Redis 5). See the [Redis guide](https://www.wakuwaku.rs/en/docs/data/redis).
 
 /// Lua that sets `now` to the server time in milliseconds.
 macro_rules! lua_now {

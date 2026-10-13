@@ -3,8 +3,14 @@
 //! [`IggyConsumerRegisterCenter`] collects one [`EventHandler`] per event
 //! type; [`start`](IggyConsumerRegisterCenter::start) validates the topics and
 //! spawns one task per configured partition, returning a [`ConsumerRuntime`].
-//! See the [crate documentation](crate#consuming) for how a batch is
-//! processed and how handler errors are treated.
+//! Stop it with [`ConsumerRuntime::shutdown`] or [`ConsumerRuntime::abort`];
+//! [`ConsumerConfig`] and [`DeliveryMode`] decide what is polled and when
+//! offsets are stored.
+//!
+//! See the [consuming guide](https://www.wakuwaku.rs/en/docs/events/consuming)
+//! for the per-partition pipeline, and the
+//! [error handling guide](https://www.wakuwaku.rs/en/docs/events/error-handling)
+//! for retries and quarantine.
 
 pub mod config;
 mod encode;

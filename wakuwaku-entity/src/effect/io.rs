@@ -7,12 +7,11 @@
 //! - A tuple of effects is their union, up to 12 elements. Tuples nest.
 //!
 //! Each effect has a [`Kind`]: [`WriteKind`] if it writes anything,
-//! [`ReadKind`] otherwise. The kind decides whether write hooks run and
-//! whether a transaction starts as read-only.
+//! [`ReadKind`] otherwise. A capability `C` may run a query with effect `X`
+//! when `C: Covers<X>`, which holds when `C` has the [`CanRead`] /
+//! [`CanWrite`] marker for every access in `X`.
 //!
-//! A capability `C` may run a query with effect `X` when `C: Covers<X>`,
-//! which holds when `C` has the [`CanRead`] / [`CanWrite`] marker for every
-//! access in `X`.
+//! See the [effects guide](https://www.wakuwaku.rs/en/docs/data#effects).
 
 use crate::effect::markers::{CanRead, CanWrite, Entity};
 use std::marker::PhantomData;

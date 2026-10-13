@@ -2,17 +2,15 @@
 //!
 //! [`AfterTransaction`] wraps a sqlx [`Db`] handle. After every
 //! [`Transaction`] whose flow ran, it hands the flow's report and what
-//! became of the transaction ([`TxFinalState`]) to its hook. Whether to act
-//! on a commit, a rollback, or an unknown commit is the hook's choice.
-//!
-//! As with [write hooks](crate::effect::hook), a hook error goes to an error
-//! handler whose own error is [`Infallible`], and never changes what the
-//! caller gets.
+//! became of the transaction ([`TxFinalState`]) to its hook. A hook error
+//! goes to an error handler whose own error is [`Infallible`], and never
+//! changes what the caller gets.
 //!
 //! Queries run on their own are forwarded to the wrapped handle, so write
-//! hooks can wrap this one: `AfterWrite<AfterTransaction<Db<_, _>, _, _>, _, _>`.
-//! Reach the transaction hook again through
+//! hooks can wrap this one; reach it again through
 //! [`AfterWrite::inner`](crate::effect::hook::AfterWrite::inner).
+//!
+//! See the [transactions guide](https://www.wakuwaku.rs/en/docs/data/transactions#hooking-the-end-of-a-transaction).
 
 use crate::effect::hook::run_hook;
 use crate::effect::io::Covers;
