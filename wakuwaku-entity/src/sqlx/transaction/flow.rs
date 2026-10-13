@@ -94,6 +94,10 @@ pub trait TxFlow: Query + From<TxEnd<Self>> {
 }
 
 /// How a flow ends: its terminal states.
+///
+/// Not `Clone`: a terminal state is consumed once, when the transaction
+/// ends.
+#[derive(Debug)]
 pub enum TxEnd<F: TxFlow> {
     /// Commit the transaction.
     Commit {
@@ -311,11 +315,7 @@ pub(crate) const fn mode<F: TxFlow>() -> TxMode {
 
 /// What became of a transaction that [`Tx::end`] closed with the terminal
 /// `state`.
-fn close<F: TxFlow>(
-    state: F,
-    aborted: bool,
-    commit: Option<Result<(), ::sqlx::Error>>,
-) -> Done<F> {
+fn close<F: TxFlow>(state: F, aborted: bool, commit: Option<Result<(), ::sqlx::Error>>) -> Done<F> {
     let (output, report) = match state.finished() {
         Either::Right(TxEnd::Commit { output, report }) => (Either::Left(output), report),
         Either::Right(TxEnd::Rollback { output, report }) => (Either::Right(output), report),
@@ -355,9 +355,10 @@ fn close<F: TxFlow>(
         (Either::Right(_), Some(Err(::sqlx::Error::Database(_)))) => {
             (Err(TxError::EndMismatch), TxFinalState::RolledBack(report))
         }
-        (Either::Right(_), Some(Err(_))) => {
-            (Err(TxError::EndMismatch), TxFinalState::CommitUnknown(report))
-        }
+        (Either::Right(_), Some(Err(_))) => (
+            Err(TxError::EndMismatch),
+            TxFinalState::CommitUnknown(report),
+        ),
     };
     Done {
         output,
