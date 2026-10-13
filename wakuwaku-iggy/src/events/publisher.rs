@@ -13,6 +13,7 @@ use std::sync::Arc;
 ///
 /// Events are partitioned by the hash of their key, so every event of a key
 /// lands in the same partition, in publish order.
+#[derive(Debug, Clone)]
 pub struct Publisher {
     client: Arc<IggyClient>,
     stream: Identifier,
