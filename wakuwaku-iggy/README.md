@@ -25,7 +25,8 @@ wakuwaku-iggy = "0.1"
 ```
 
 1. Implement `PartitionKey` for the key type and `Event` for each event type.
-2. Publish with `Publisher::publish`.
+2. Publish with `Publisher::publish`, or `Publisher::publish_batch` for many
+   events of one type.
 3. Implement `EventHandler` for each event type, register the handlers with
    `IggyConsumerRegisterCenter`, and `start` it with a `ConsumerConfig`.
 
