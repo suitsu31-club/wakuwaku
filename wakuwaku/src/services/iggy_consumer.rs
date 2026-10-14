@@ -97,7 +97,10 @@
 //!     // dependency's position as `_` to have them inferred.
 //!     let (services, consumers) = ServiceBuilder::new(Mailer)
 //!         .iggy_consumer::<SendWelcomeMail, _, _>()
-//!         .start(client, ConsumerConfig::new("shop", "mailer", vec![1]))
+//!         // Iggy partition ids are zero-based: list every partition of the
+//!         // topic, here the single partition `0` of a topic created with
+//!         // defaults.
+//!         .start(client, ConsumerConfig::new("shop", "mailer", vec![0]))
 //!         .await?;
 //!
 //!     let _mailer: &Mailer = services.provide::<Mailer, _>();

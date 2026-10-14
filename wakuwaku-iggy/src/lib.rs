@@ -107,8 +107,10 @@
 //!     let publisher = Publisher::new(client.clone(), "shop")?;
 //!     publisher.publish(PointsGranted { user: 7, points: 10 }).await?;
 //!
+//!     // Iggy partition ids are zero-based: list every partition of the topic,
+//!     // here the single partition `0` of a topic created with defaults.
 //!     let runtime = IggyConsumerRegisterCenter::new(Arc::new(GrantPoints))
-//!         .start(client, ConsumerConfig::new("shop", "points", vec![1]))
+//!         .start(client, ConsumerConfig::new("shop", "points", vec![0]))
 //!         .await?;
 //!     tokio::signal::ctrl_c().await?;
 //!     runtime.shutdown().await;
