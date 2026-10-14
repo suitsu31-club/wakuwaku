@@ -1,6 +1,6 @@
 [package]
 name = "wakuwaku"
-version = "1.0.0-rc2"
+version = "1.0.0-rc3"
 edition.workspace = true
 description = "Proof-driven microservice framework: type-level service builder, gRPC registration, cron jobs, and the wakuwaku crates in one dependency"
 license.workspace = true
@@ -20,7 +20,7 @@ futures-util = { version = "0.3", default-features = false, features = ["std"] }
 # Wakuwaku Components
 wakuwaku-proof = { version = "0.2", path = "../wakuwaku-proof", optional = true }
 wakuwaku-iggy = { version = "0.2", path = "../wakuwaku-iggy", optional = true }
-wakuwaku-entity = { version = "0.2", path = "../wakuwaku-entity", default-features = false, optional = true }
+wakuwaku-entity = { version = "0.3", path = "../wakuwaku-entity", default-features = false, optional = true }
 
 # Optional features
 tonic = { version = "0.14", optional = true }
