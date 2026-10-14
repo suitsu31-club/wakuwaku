@@ -16,7 +16,9 @@ use crate::effect::hook::run_hook;
 use crate::effect::io::Covers;
 use crate::query::{Db, Execute};
 use crate::sqlx::backend::{SqlxBackend, SqlxSource};
-use crate::sqlx::transaction::{Transaction, TxError, TxFinalState, TxFlow, TxOutput, drive};
+use crate::sqlx::transaction::{
+    Transaction, TxEffect, TxError, TxFinalState, TxFlow, TxOutput, drive,
+};
 use kanau::processor::{Processor, ProcessorReturn};
 use std::convert::Infallible;
 
@@ -48,7 +50,7 @@ impl<DB, C, F, H, EH> Processor<Transaction<F>> for AfterTransaction<Db<SqlxSour
 where
     DB: SqlxBackend,
     F: TxFlow<Database = DB>,
-    C: Covers<F::Effect>,
+    C: Covers<<F::Capability as TxEffect>::Effect>,
     H: Processor<TxFinalState<F::Report>> + Sync,
     H::Error: Send,
     EH: Processor<H::Error, Error = Infallible> + Sync,

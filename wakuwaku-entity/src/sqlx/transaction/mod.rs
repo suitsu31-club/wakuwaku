@@ -1,9 +1,10 @@
 //! Transactions on sqlx sources.
 //!
-//! Write the transaction as a [`TxFlow`], wrap its first state in a
-//! [`Transaction`], and process it with a [`Db`] whose capability covers the
-//! flow's effect. The result is a [`TxOutput`] or a [`TxError`]; to act on
-//! how the transaction ended, wrap the handle in an
+//! Write the transaction as a [`TxFlow`] that declares what it touches with
+//! [`tx_effect!`](crate::tx_effect), wrap its first state in a
+//! [`Transaction`], and process it with a [`Db`] whose capability covers
+//! that declaration. The result is a [`TxOutput`] or a [`TxError`]; to act
+//! on how the transaction ended, wrap the handle in an
 //! [`AfterTransaction`](hook::AfterTransaction).
 //!
 //! ```no_run
@@ -11,7 +12,7 @@
 //! use sqlx::{PgConnection, PgPool, Postgres};
 //! use wakuwaku_entity::sqlx::backend::{PgSource, SqlxSource};
 //! use wakuwaku_entity::sqlx::transaction::{Either, Transaction, Tx, TxEnd, TxFlow, TxState};
-//! use wakuwaku_entity::{Db, Entity, Execute, Query, ReadWrite, Write};
+//! use wakuwaku_entity::{Db, Entity, Execute, Query, ReadWrite, Write, tx_effect};
 //!
 //! struct Account;
 //! impl Entity for Account {}
@@ -38,15 +39,17 @@
 //!     Start { to: i64 },
 //!     End(TxEnd<Bonus>),
 //! }
-//! impl Query for Bonus {
-//!     type Effect = Write<Account>;
+//! tx_effect! {
+//!     enum BonusEffect { write Account }
 //! }
+//!
 //! impl From<TxEnd<Bonus>> for Bonus {
 //!     fn from(end: TxEnd<Bonus>) -> Self {
 //!         Bonus::End(end)
 //!     }
 //! }
 //! impl TxFlow for Bonus {
+//!     type Capability = BonusEffect;
 //!     type Database = Postgres;
 //!     type Commit = ();
 //!     type Abort = ();
@@ -83,8 +86,8 @@ pub mod hook;
 
 pub use either::Either;
 pub use flow::{
-    AsSqlxError, IsolationLevel, Tx, TxEnd, TxError, TxFinalState, TxFlow, TxMode, TxOutput,
-    TxState,
+    AsSqlxError, IsolationLevel, Tx, TxEffect, TxEnd, TxError, TxFinalState, TxFlow, TxMode,
+    TxOutput, TxState,
 };
 
 use crate::effect::io::Covers;
@@ -101,7 +104,7 @@ impl<DB, C, F> Processor<Transaction<F>> for Db<SqlxSource<DB>, C>
 where
     DB: SqlxBackend,
     F: TxFlow<Database = DB>,
-    C: Covers<F::Effect>,
+    C: Covers<<F::Capability as TxEffect>::Effect>,
 {
     type Output = TxOutput<F::Commit, F::Abort>;
     type Error = TxError;
