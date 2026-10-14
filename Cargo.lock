@@ -3982,8 +3982,9 @@ dependencies = [
 
 [[package]]
 name = "wakuwaku-proof"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
+ "thiserror 2.0.20",
  "tokio",
 ]
 
