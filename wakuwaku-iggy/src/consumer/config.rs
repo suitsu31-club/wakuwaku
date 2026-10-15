@@ -37,7 +37,10 @@ pub struct ConsumerConfig {
     pub stream: String,
     /// Name of the Iggy consumer that stores the offsets.
     pub consumer_name: String,
-    /// Partitions of the main topic to consume. Each gets its own task.
+    /// Partitions of the main topic to consume, by zero-based Iggy partition
+    /// id (`0..partitions_count`). Each gets its own task. Events are spread
+    /// over every partition of the topic by key hash, so a partition left out
+    /// here is not consumed by this consumer.
     pub partitions: Vec<u32>,
     /// When offsets are stored.
     pub mode: DeliveryMode,

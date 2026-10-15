@@ -8,8 +8,8 @@
 //!
 //! See the [transactions guide](https://www.wakuwaku.rs/en/docs/data/transactions).
 
-use crate::effect::io::{Effect, Kind};
-use crate::query::{Execute, Query};
+use crate::effect::io::{Covers, Effect, Kind};
+use crate::query::Execute;
 use crate::sqlx::backend::{SqlxBackend, SqlxSource};
 use ::sqlx::Transaction;
 use either::Either;
@@ -54,20 +54,85 @@ impl AsSqlxError for ::sqlx::Error {
     }
 }
 
-/// Whether the effect of the query `Q` writes.
-type EffectKind<Q> = <<Q as Query>::Effect as Effect>::Kind;
+/// The entities a transaction may read and write.
+///
+/// The implementing type is a capability: it has the
+/// [`CanRead`](crate::CanRead) / [`CanWrite`](crate::CanWrite) marker for
+/// each declared access, and every query of the flow must stay within it
+/// ([`Tx::run`]). [`Effect`](Self::Effect) lists the same accesses; the
+/// [`Db`](crate::query::Db) that runs the flow must cover it.
+///
+/// Implemented by [`tx_effect!`](crate::tx_effect), which writes both from
+/// one list; don't implement it by hand. A capability wider than its effect
+/// would let the flow touch entities the handle never checked.
+pub trait TxEffect {
+    /// The declared accesses.
+    type Effect: Effect;
+}
+
+/// Declare what a transaction may touch: a type for
+/// [`TxFlow::Capability`].
+///
+/// `write E` lets the flow's queries read and write the entity `E`, `read E`
+/// only read it. List each entity once: `write` already covers reading, and
+/// an entity listed twice doesn't compile.
+///
+/// ```
+/// use wakuwaku_entity::{Entity, tx_effect};
+///
+/// struct Account;
+/// impl Entity for Account {}
+///
+/// struct User;
+/// impl Entity for User {}
+///
+/// tx_effect! {
+///     /// Moves money between accounts of a user.
+///     enum TransferEffect { write Account, read User }
+/// }
+/// ```
+#[macro_export]
+macro_rules! tx_effect {
+    (@marker $name:ident read $entity:ty) => {
+        impl $crate::CanRead<$entity> for $name {}
+    };
+    (@marker $name:ident write $entity:ty) => {
+        impl $crate::CanRead<$entity> for $name {}
+        impl $crate::CanWrite<$entity> for $name {}
+    };
+    // Nested pairs, so the list isn't capped by the tuple impls.
+    (@effect) => { () };
+    (@effect read $entity:ty, $($rest:tt)*) => {
+        ($crate::Read<$entity>, $crate::tx_effect!(@effect $($rest)*))
+    };
+    (@effect write $entity:ty, $($rest:tt)*) => {
+        ($crate::Write<$entity>, $crate::tx_effect!(@effect $($rest)*))
+    };
+    ($(#[$meta:meta])* $vis:vis enum $name:ident { $($access:ident $entity:ty),* $(,)? }) => {
+        $(#[$meta])*
+        $vis enum $name {}
+        $($crate::tx_effect!(@marker $name $access $entity);)*
+        impl $crate::sqlx::transaction::TxEffect for $name {
+            type Effect = $crate::tx_effect!(@effect $($access $entity,)*);
+        }
+    };
+}
 
 /// The business logic of a transaction, as a state machine.
 ///
-/// The implementing type is the state. Its [`Effect`](Query::Effect) is
-/// everything the transaction may touch: a [`Db`](crate::query::Db) must
-/// cover it to run the flow, and a flow whose effect only reads starts its
-/// transaction `READ ONLY` and can't run a query that writes.
+/// The implementing type is the state. Its [`Capability`](Self::Capability)
+/// is everything the transaction may touch: every query of the flow must
+/// stay within it ([`Tx::run`]), a [`Db`](crate::query::Db) must cover it to
+/// run the flow, and a flow that declares no write starts its transaction
+/// `READ ONLY`.
 ///
 /// The terminal states are the [`TxEnd`]s, turned into states by
 /// `From<TxEnd<Self>>`. [`finished`](Self::finished) must give each back:
 /// `finished(end.into())` is `Right(end)`.
-pub trait TxFlow: Query + From<TxEnd<Self>> {
+pub trait TxFlow: Send + Sized + From<TxEnd<Self>> {
+    /// The entities the flow may read and write, declared with
+    /// [`tx_effect!`](crate::tx_effect).
+    type Capability: TxEffect;
     /// The database the flow runs on.
     type Database: SqlxBackend;
     /// Returned to the caller after a commit.
@@ -183,11 +248,71 @@ impl<'c, F: TxFlow> Tx<'c, F> {
     /// [aborted](Self::is_aborted): later queries fail without being sent,
     /// and it can only roll back.
     ///
-    /// A query that writes can't run in a flow whose effect only reads.
+    /// The flow's [`Capability`](TxFlow::Capability) must cover the query's
+    /// effect, so a handle that covers the flow covers each of its queries:
+    ///
+    /// ```compile_fail,E0277
+    /// # use sqlx::{PgConnection, Postgres};
+    /// # use wakuwaku_entity::sqlx::backend::SqlxSource;
+    /// # use wakuwaku_entity::sqlx::transaction::{Either, Tx, TxEnd, TxFlow, TxState};
+    /// # use wakuwaku_entity::{Entity, Execute, Query, Write, tx_effect};
+    /// struct Declared;
+    /// impl Entity for Declared {}
+    ///
+    /// struct Undeclared;
+    /// impl Entity for Undeclared {}
+    ///
+    /// struct WipeUndeclared;
+    /// impl Query for WipeUndeclared {
+    ///     type Effect = Write<Undeclared>;
+    /// }
+    /// # impl Execute<SqlxSource<Postgres>> for WipeUndeclared {
+    /// #     type Output = ();
+    /// #     type Error = sqlx::Error;
+    /// #     async fn execute(self, _: &mut PgConnection) -> Result<(), sqlx::Error> {
+    /// #         Ok(())
+    /// #     }
+    /// # }
+    ///
+    /// tx_effect! {
+    ///     enum OnlyDeclared { write Declared }
+    /// }
+    ///
+    /// enum Flow {
+    ///     Start,
+    ///     End(TxEnd<Flow>),
+    /// }
+    /// # impl From<TxEnd<Flow>> for Flow {
+    /// #     fn from(end: TxEnd<Flow>) -> Self {
+    /// #         Flow::End(end)
+    /// #     }
+    /// # }
+    ///
+    /// impl TxFlow for Flow {
+    ///     type Capability = OnlyDeclared;
+    /// #   type Database = Postgres;
+    /// #   type Commit = ();
+    /// #   type Abort = ();
+    /// #   type Report = ();
+    ///
+    ///     async fn step(tx: Tx<'_, Self>, _: Self) -> TxState<'_, Self> {
+    ///         // error: `OnlyDeclared: CanWrite<Undeclared>` is not satisfied
+    ///         let (tx, _) = tx.run(WipeUndeclared).await;
+    ///         tx.end(Flow::End(TxEnd::Commit { output: (), report: () })).await
+    ///     }
+    /// #
+    /// #   fn finished(self) -> Either<Self, TxEnd<Self>> {
+    /// #       match self {
+    /// #           Flow::End(end) => Either::Right(end),
+    /// #           state => Either::Left(state),
+    /// #       }
+    /// #   }
+    /// }
+    /// ```
     pub async fn run<Q>(mut self, query: Q) -> (Self, Result<Q::Output, Q::Error>)
     where
         Q: Execute<SqlxSource<F::Database>, Error: AsSqlxError>,
-        EffectKind<Q>: Kind<Join<EffectKind<F>> = EffectKind<F>>,
+        F::Capability: Covers<Q::Effect>,
     {
         if self.aborted {
             return (self, Err(already_aborted().into()));
@@ -305,11 +430,11 @@ impl<F: TxFlow> Done<F> {
 }
 
 /// How to begin a transaction for `F`: its isolation level, and `READ ONLY`
-/// if its effect doesn't write.
+/// if it declares no write.
 pub(crate) const fn mode<F: TxFlow>() -> TxMode {
     TxMode {
         isolation: F::ISOLATION,
-        read_only: !<EffectKind<F> as Kind>::WRITES,
+        read_only: !<<<F::Capability as TxEffect>::Effect as Effect>::Kind as Kind>::WRITES,
     }
 }
 
@@ -369,7 +494,6 @@ fn close<F: TxFlow>(state: F, aborted: bool, commit: Option<Result<(), ::sqlx::E
 #[cfg(all(test, feature = "sqlx-pg"))]
 mod tests {
     use super::*;
-    use crate::effect::io::{Read, Write};
     use crate::effect::markers::Entity;
     use ::sqlx::Postgres;
     use ::sqlx::error::{DatabaseError, ErrorKind};
@@ -381,22 +505,19 @@ mod tests {
     impl Entity for Account {}
 
     /// A flow that only ends: its states are a start and its ends.
-    enum Check<X: Effect> {
+    enum Check<X: TxEffect> {
         Start(PhantomData<fn() -> X>),
         End(TxEnd<Check<X>>),
     }
 
-    impl<X: Effect> Query for Check<X> {
-        type Effect = X;
-    }
-
-    impl<X: Effect> From<TxEnd<Check<X>>> for Check<X> {
+    impl<X: TxEffect> From<TxEnd<Check<X>>> for Check<X> {
         fn from(end: TxEnd<Check<X>>) -> Self {
             Check::End(end)
         }
     }
 
-    impl<X: Effect> TxFlow for Check<X> {
+    impl<X: TxEffect> TxFlow for Check<X> {
+        type Capability = X;
         type Database = Postgres;
         type Commit = i64;
         type Abort = String;
@@ -416,8 +537,11 @@ mod tests {
         }
     }
 
-    type ReadCheck = Check<Read<Account>>;
-    type WriteCheck = Check<(Read<Account>, Write<Account>)>;
+    crate::tx_effect!(enum ReadAccount { read Account });
+    crate::tx_effect!(enum WriteAccount { write Account });
+
+    type ReadCheck = Check<ReadAccount>;
+    type WriteCheck = Check<WriteAccount>;
 
     fn commit(output: i64) -> WriteCheck {
         Check::End(TxEnd::Commit {

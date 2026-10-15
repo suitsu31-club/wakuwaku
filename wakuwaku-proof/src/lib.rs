@@ -12,13 +12,17 @@
 
 pub mod boolean_algebra;
 
+use std::borrow::Borrow;
 use std::convert::Infallible;
+use std::fmt::{self, Display, Formatter};
+use std::marker::PhantomData;
 use std::ops::Deref;
 
 #[cfg(doc)]
 use boolean_algebra::{Absorb, Associate, Commute, Distribute, Idempotence};
 
-/// Human-readable explanation of why a [`Predicate`] rejected its subject.
+/// Human-readable explanation of why a [`Predicate`] rejected its subject. Its
+/// [`Display`] is the text.
 ///
 /// Equality is **pointer identity** of the `&'static str`, not string content: two
 /// `DeniedReason`s are equal only when they point at the same string data. Separate
@@ -45,13 +49,40 @@ impl PartialEq<Self> for DeniedReason {
 
 impl Eq for DeniedReason {}
 
+impl Display for DeniedReason {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
 /// Failure of a [`Predicate`] check.
-#[derive(Debug)]
+///
+/// Implements [`std::error::Error`] when `E` is [`Debug`](fmt::Debug) and [`Display`],
+/// which includes [`Infallible`], so it propagates with `?` into `Box<dyn Error>` or
+/// `anyhow::Error`.
+///
+/// ```
+/// use std::convert::Infallible;
+/// use wakuwaku_proof::{DeniedReason, ValidateError};
+///
+/// static EMPTY: DeniedReason = DeniedReason("username is empty");
+///
+/// let denied: ValidateError<Infallible> = ValidateError::Deny(EMPTY);
+/// assert_eq!(denied.to_string(), "username is empty");
+///
+/// let io: ValidateError<std::io::Error> =
+///     ValidateError::IoError(std::io::Error::other("connection refused"));
+/// assert_eq!(io.to_string(), "could not decide the proposition: connection refused");
+/// ```
+#[derive(Debug, thiserror::Error)]
 pub enum ValidateError<E> {
     /// The proposition could not be decided, e.g. a backing service was unreachable.
     /// Says nothing about whether the subject is valid.
+    #[error("could not decide the proposition: {0}")]
     IoError(E),
-    /// The proposition was decided and does not hold for the subject.
+    /// The proposition was decided and does not hold for the subject. Displays as the
+    /// [`DeniedReason`]'s text.
+    #[error("{0}")]
     Deny(DeniedReason),
 }
 
@@ -150,7 +181,9 @@ impl<P> Deref for Evidence<P> {
 /// `&P`. Both reflect the moment of the check: if `P` depends on external state, such
 /// as a database row, that state may have changed since.
 ///
-/// `Proven<T, P>` is [`Send`] / [`Sync`] when both `T` and `P` are.
+/// `Proven<T, P>` is [`Send`] / [`Sync`] when both `T` and `P` are, and
+/// [`Debug`](fmt::Debug) when both are.
+#[derive(Debug)]
 pub struct Proven<T, P> {
     subject: T,
     evidence: Evidence<P>,
@@ -221,6 +254,12 @@ pub async fn prove<T, P: Predicate<T>>(
 /// [`ValidateError::IoError`]. `P` is only the evidence type and need not implement
 /// [`Predicate`].
 ///
+/// The function takes the subject as `&B`, a borrowed form of `T` obtained through
+/// [`Borrow`]. `B` defaults to `T`; set it to check a `String` through `&str`, a
+/// `Vec<u8>` through `&[u8]`, and so on. The proof is only as sound as `T`'s
+/// [`Borrow<B>`]: the function decides `P` for the borrowed view, and [`Borrow`]'s
+/// contract is what makes that view stand for the owned subject.
+///
 /// [`new`](Self::new) is a `const fn` and a function pointer is always [`Send`] and
 /// [`Sync`], whatever `T` and `P` are, so a verifier can be declared as a `static` or a
 /// `const`.
@@ -238,32 +277,41 @@ pub async fn prove<T, P: Predicate<T>>(
 ///
 /// pub struct NonEmpty(());
 ///
-/// fn non_empty(name: &String) -> Result<NonEmpty, ValidateError<Infallible>> {
+/// fn non_empty(name: &str) -> Result<NonEmpty, ValidateError<Infallible>> {
 ///     if name.is_empty() { Err(ValidateError::Deny(EMPTY)) } else { Ok(NonEmpty(())) }
 /// }
 ///
-/// pub static NON_EMPTY: PureVerifier<String, NonEmpty> = PureVerifier::new(non_empty);
-/// pub const NON_EMPTY_CONST: PureVerifier<String, NonEmpty> = PureVerifier::new(non_empty);
+/// // Owns a `String`, checks it as `&str`.
+/// pub static NON_EMPTY: PureVerifier<String, NonEmpty, str> = PureVerifier::new(non_empty);
+/// // Same check, same evidence, for `Box<str>` subjects.
+/// pub const NON_EMPTY_BOXED: PureVerifier<Box<str>, NonEmpty, str> =
+///     PureVerifier::new(non_empty);
 ///
 /// let name = NON_EMPTY.prove("haruki".to_owned());
 /// assert!(matches!(name, Ok(proof) if proof.subject() == "haruki"));
 ///
 /// // `Deny` is the only possible error.
-/// let Err(ValidateError::Deny(reason)) = NON_EMPTY_CONST.prove(String::new()) else {
+/// let Err(ValidateError::Deny(reason)) = NON_EMPTY_BOXED.prove(Box::from("")) else {
 ///     unreachable!()
 /// };
 /// assert_eq!(reason, EMPTY);
 /// ```
-pub struct PureVerifier<T, P> {
-    check: fn(&T) -> Result<P, ValidateError<Infallible>>,
+pub struct PureVerifier<T, P, B: ?Sized = T> {
+    check: fn(&B) -> Result<P, ValidateError<Infallible>>,
+    subject: PhantomData<fn() -> T>,
 }
 
-impl<T, P> PureVerifier<T, P> {
+impl<T, P, B: ?Sized> PureVerifier<T, P, B> {
     /// A verifier that runs `check`.
-    pub const fn new(check: fn(&T) -> Result<P, ValidateError<Infallible>>) -> Self {
-        Self { check }
+    pub const fn new(check: fn(&B) -> Result<P, ValidateError<Infallible>>) -> Self {
+        Self {
+            check,
+            subject: PhantomData,
+        }
     }
+}
 
+impl<T: Borrow<B>, P, B: ?Sized> PureVerifier<T, P, B> {
     /// Runs the check against `subject` and, if it holds, wraps the subject and the
     /// evidence in [`Proven`].
     ///
@@ -272,7 +320,7 @@ impl<T, P> PureVerifier<T, P> {
     /// Returns the [`ValidateError::Deny`] from the check. The subject is dropped in that
     /// case.
     pub fn prove(&self, subject: T) -> Result<Proven<T, P>, ValidateError<Infallible>> {
-        let evidence = (self.check)(&subject)?;
+        let evidence = (self.check)(subject.borrow())?;
         Ok(Proven {
             subject,
             evidence: Evidence(evidence),
