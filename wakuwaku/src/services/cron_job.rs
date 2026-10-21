@@ -101,6 +101,37 @@ pub struct CronTick {
 /// A run that returns an error, or panics, is logged with [`tracing`] and
 /// the job keeps its schedule.
 ///
+/// # Reading an interval
+///
+/// There is deliberately no accessor for the bare duration: the same `d`
+/// spaces runs differently in each variant (overlap, drift, catch-up), and a
+/// lone `d` would erase exactly that difference. Print an interval with
+/// [`Debug`], which keeps the variant, or match on it and handle each
+/// variant on its own terms:
+///
+/// ```
+/// use std::time::Duration;
+/// use wakuwaku::services::cron_job::CronJobInterval;
+///
+/// /// Time from the start of one run to the start of the next, for runs
+/// /// that take `run_time`.
+/// fn start_to_start(interval: CronJobInterval, run_time: Duration) -> Duration {
+///     match interval {
+///         CronJobInterval::AfterFinish(pause) => run_time + pause,
+///         CronJobInterval::AtLeast(period) => period.max(run_time),
+///         // Ignores grid points skipped while the runtime was blocked.
+///         CronJobInterval::AfterStart(period) => period,
+///     }
+/// }
+///
+/// let interval = CronJobInterval::AtLeast(Duration::from_secs(30));
+/// assert_eq!(format!("{interval:?}"), "AtLeast(30s)");
+/// assert_eq!(start_to_start(interval, Duration::from_secs(45)), Duration::from_secs(45));
+/// ```
+///
+/// Matching `AfterFinish(d) | AtLeast(d) | AfterStart(d) => d` is that
+/// missing accessor written by hand, and loses the same information.
+///
 /// # Zero duration
 ///
 /// `d` must not be zero. Registering a job with a zero duration
@@ -151,7 +182,8 @@ pub enum CronJobInterval {
 }
 
 impl CronJobInterval {
-    /// The duration of any variant.
+    /// The duration of any variant, for the zero check. Not public on
+    /// purpose: see [Reading an interval](CronJobInterval#reading-an-interval).
     const fn duration(self) -> Duration {
         match self {
             Self::AfterFinish(duration) | Self::AtLeast(duration) | Self::AfterStart(duration) => {
