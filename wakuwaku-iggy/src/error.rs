@@ -78,6 +78,7 @@ impl Display for HandleError {
 }
 
 /// Error of setting up a consumer or publishing an event.
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("{0}")]
