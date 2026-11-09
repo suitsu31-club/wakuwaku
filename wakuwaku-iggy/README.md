@@ -21,7 +21,7 @@ retry topic without blocking the others.
 
 ```toml
 [dependencies]
-wakuwaku-iggy = "0.2"
+wakuwaku-iggy = "0.3"
 ```
 
 1. Implement `PartitionKey` for the key type and `Event` for each event type.

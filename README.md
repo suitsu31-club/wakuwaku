@@ -35,7 +35,7 @@ Third-party crates that appear in these APIs (`kanau`, `tonic`, `iggy`, `sqlx`, 
 
 ```toml
 [dependencies]
-wakuwaku = { version = "1.0.0-rc1", features = ["iggy", "sqlx-pg", "redis"] }
+wakuwaku = { version = "1.0.0-rc4", features = ["iggy", "sqlx-pg", "redis"] }
 ```
 
 ## Example
