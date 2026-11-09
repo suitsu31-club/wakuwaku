@@ -44,8 +44,10 @@
 //!
 //! - [`collection`]: typed data structures queried on demand (caches,
 //!   locks, a rate limiter).
-//! - [`dynamic`]: typed data structures that can also be followed as they
-//!   change (a pipe, live views, stream buffers).
+//! - [`dynamic`]: typed data structures that can also be waited on as they
+//!   change (promises, watches, a pipe, live views, stream buffers), woken
+//!   by one [`WatchHub`](watch_hub::WatchHub) per process.
+//! - [`watch_hub`]: the reactor that wakes waits on the dynamic structures.
 //!
 //! # Keys
 //!
@@ -59,6 +61,7 @@
 
 pub mod collection;
 pub mod dynamic;
+pub mod watch_hub;
 
 use crate::query::{DataSource, Execute};
 use kanau::message::{DeserializeError, SerializeError};

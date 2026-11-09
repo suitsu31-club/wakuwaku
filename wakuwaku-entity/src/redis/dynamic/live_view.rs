@@ -10,9 +10,9 @@
 //! use futures_util::StreamExt;
 //! use kanau::message::{DeserializeError, MessageDe, MessageSer, SerializeError};
 //! use kanau::processor::Processor;
-//! use redis::aio::MultiplexedConnection;
 //! use wakuwaku_entity::redis::RedisSource;
 //! use wakuwaku_entity::redis::dynamic::live_view::{Commit, LiveView, LiveViewDiff};
+//! use wakuwaku_entity::redis::watch_hub::WatchHub;
 //! use wakuwaku_entity::{Db, ReadWrite};
 //!
 //! /// A document as a list of lines.
@@ -48,10 +48,7 @@
 //!
 //! const DOCUMENTS: LiveView<u64, Lines> = LiveView::new("document", 100);
 //!
-//! # async fn run(
-//! #     db: Db<RedisSource, ReadWrite>,
-//! #     dedicated: MultiplexedConnection,
-//! # ) -> redis::RedisResult<()> {
+//! # async fn run(db: Db<RedisSource, ReadWrite>, hub: WatchHub) -> redis::RedisResult<()> {
 //! // Writer
 //! db.process(DOCUMENTS.create(&7, Lines(vec!["title".into()]))).await?;
 //! let mut latest = db.process(DOCUMENTS.get(&7)).await?.expect("just created");
@@ -64,8 +61,8 @@
 //!     Commit::Absent => println!("removed meanwhile"),
 //! }
 //!
-//! // Subscriber, on a connection of its own
-//! if let Some((mut view, subscription)) = db.process(DOCUMENTS.subscribe(&7, dedicated)).await? {
+//! // Subscriber, woken by the process's hub
+//! if let Some((mut view, subscription)) = db.process(DOCUMENTS.subscribe(&7, &hub)).await? {
 //!     let mut events = std::pin::pin!(subscription.into_stream());
 //!     while let Some(event) = events.next().await {
 //!         view.update(event?);
@@ -76,10 +73,11 @@
 //! # }
 //! ```
 
-use super::{Entry, EntryId, StreamCursor, parse_range};
+use super::{Entry, EntryId, StreamCursor, VERSION_FIELD, Versioned, parse_range, read_versioned};
 use crate::effect::io::{Read, Write};
 use crate::effect::markers::Entity;
 use crate::query::{Execute, Query};
+use crate::redis::watch_hub::{Waiter, WatchHub};
 use crate::redis::{Name, RedisSource, corrupted, deserialize_error, serialize_error, tagged_pair};
 use futures_util::Stream;
 use kanau::message::{MessageDe, MessageSer};
@@ -101,10 +99,6 @@ pub trait LiveViewDiff: MessageSer + MessageDe {
 /// Names `N` and bodies `B` of a live view, without owning either.
 type Items<N, B> = PhantomData<fn(&N) -> B>;
 
-/// Field of the head holding its version.
-const VERSION_FIELD: &str = "v";
-/// Field of the head holding its body.
-const BODY_FIELD: &str = "b";
 /// Field of a history entry holding the body at its version, in the base.
 const BASE_ENTRY: &[u8] = b"base";
 /// Field of a history entry holding the diff to its version from the
@@ -112,7 +106,8 @@ const BASE_ENTRY: &[u8] = b"base";
 const DIFF_ENTRY: &[u8] = b"diff";
 
 /// Creates the view with head `KEYS[1]` and history `KEYS[2]` at version 1
-/// with the body `ARGV[1]`, unless it exists. Returns whether it created it.
+/// with the body `ARGV[1]`, unless it exists, and wakes its subscribers.
+/// Returns whether it created it.
 static CREATE: LazyLock<Script> = LazyLock::new(|| {
     Script::new(
         r"
@@ -120,18 +115,19 @@ if redis.call('EXISTS', KEYS[1]) == 1 then return 0 end
 redis.call('HSET', KEYS[1], 'v', '1', 'b', ARGV[1])
 redis.call('DEL', KEYS[2])
 redis.call('XADD', KEYS[2], '1-0', 'base', ARGV[1])
+redis.call('PUBLISH', KEYS[2], '')
 return 1
 ",
     )
 });
 
 /// If the head `KEYS[1]` is at version `ARGV[1]`, moves it to the next
-/// version with the body `ARGV[3]`, and adds the diff `ARGV[2]` to the
-/// history `KEYS[2]`. If the history already holds `ARGV[4]` diffs, it is
-/// replaced by a base entry holding both the body and the diff, so a
-/// subscriber at the previous version still reads a diff. Returns `{0}` if
-/// the view is absent, `{1, head}` on a conflict, `{2, version}` once
-/// committed.
+/// version with the body `ARGV[3]`, adds the diff `ARGV[2]` to the
+/// history `KEYS[2]`, and wakes its subscribers. If the history already
+/// holds `ARGV[4]` diffs, it is replaced by a base entry holding both the
+/// body and the diff, so a subscriber at the previous version still reads
+/// a diff. Returns `{0}` if the view is absent, `{1, head}` on a conflict,
+/// `{2, version}` once committed.
 static COMMIT: LazyLock<Script> = LazyLock::new(|| {
     Script::new(
         r"
@@ -146,6 +142,7 @@ if redis.call('XLEN', KEYS[2]) > tonumber(ARGV[4]) then
 else
   redis.call('XADD', KEYS[2], version .. '-0', 'diff', ARGV[2])
 end
+redis.call('PUBLISH', KEYS[2], '')
 return {2, tonumber(version)}
 ",
     )
@@ -246,29 +243,28 @@ impl<N: Name + ?Sized, B: LiveViewDiff> LiveView<N, B> {
         }
     }
 
-    /// Follow `name` using `conn`, a connection used for nothing else (see
-    /// [following changes](super#following-changes)). Outputs the latest
-    /// version and a subscription to the versions after it, `None` if the
-    /// view is absent.
-    pub fn subscribe<D>(&self, name: &N, conn: D) -> LiveViewSubscribe<N, B, D> {
+    /// Follow `name`, woken by `hub`. Outputs the latest version and a
+    /// subscription to the versions after it, `None` if the view is
+    /// absent.
+    pub fn subscribe(&self, name: &N, hub: &WatchHub) -> LiveViewSubscribe<N, B> {
         let (head, log) = self.keys(name);
         LiveViewSubscribe {
             head,
             log,
-            conn,
+            hub: hub.clone(),
             items: PhantomData,
         }
     }
 
-    /// Follow `name` from `version` on, using `conn`, a connection used for
-    /// nothing else. The subscription outputs the versions after `version`,
-    /// starting with a [snapshot](LiveViewEvent::Snapshot) if the diffs
-    /// right after `version` were squashed into a new base.
-    pub fn resume<D>(&self, name: &N, version: u64, conn: D) -> LiveViewResume<N, B, D> {
+    /// Follow `name` from `version` on, woken by `hub`. The subscription
+    /// outputs the versions after `version`, starting with a
+    /// [snapshot](LiveViewEvent::Snapshot) if the diffs right after
+    /// `version` were squashed into a new base.
+    pub fn resume(&self, name: &N, version: u64, hub: &WatchHub) -> LiveViewResume<N, B> {
         LiveViewResume {
             log: self.keys(name).1,
             version,
-            conn,
+            hub: hub.clone(),
             items: PhantomData,
         }
     }
@@ -283,7 +279,8 @@ impl<N: Name + ?Sized, B: LiveViewDiff> LiveView<N, B> {
         }
     }
 
-    /// The head and history keys of `name`.
+    /// The head and history keys of `name`. The history key is also the
+    /// channel that wakes the subscribers.
     fn keys(&self, name: &N) -> (Vec<u8>, Vec<u8>) {
         tagged_pair("LiveView", self.namespace, name, b":h", b":l")
     }
@@ -307,15 +304,6 @@ impl<N: ?Sized, B> Debug for LiveView<N, B> {
 }
 
 impl<N: ?Sized, B> Entity for LiveView<N, B> {}
-
-/// A body at a version.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Versioned<B> {
-    /// The version, from 1.
-    pub version: u64,
-    /// The body at that version.
-    pub body: B,
-}
 
 impl<B: LiveViewDiff> Versioned<B> {
     /// Move to the version of `event`, which must come right after this
@@ -451,27 +439,6 @@ where
     }
 }
 
-/// Read the head `key`.
-async fn read_head<B: MessageDe>(
-    head: &[u8],
-    conn: &mut (impl ConnectionLike + Send),
-) -> RedisResult<Option<Versioned<B>>> {
-    let (version, body): (Option<u64>, Option<Vec<u8>>) = redis::cmd("HMGET")
-        .arg(head)
-        .arg(VERSION_FIELD)
-        .arg(BODY_FIELD)
-        .query_async(conn)
-        .await?;
-    match (version, body) {
-        (Some(version), Some(body)) => Ok(Some(Versioned {
-            version,
-            body: parse_body(&body)?,
-        })),
-        (None, None) => Ok(None),
-        _ => Err(corrupted("live view head lacks its version or body")),
-    }
-}
-
 /// Query from [`LiveView::get`].
 pub struct LiveViewGet<N: ?Sized, B> {
     head: Vec<u8>,
@@ -492,7 +459,7 @@ where
     type Error = RedisError;
 
     async fn execute(self, conn: &mut C) -> RedisResult<Option<Versioned<B>>> {
-        read_head(&self.head, conn).await
+        read_versioned(&self.head, conn).await
     }
 }
 
@@ -631,76 +598,84 @@ where
 }
 
 /// Query from [`LiveView::subscribe`].
-pub struct LiveViewSubscribe<N: ?Sized, B, D> {
+pub struct LiveViewSubscribe<N: ?Sized, B> {
     head: Vec<u8>,
     log: Vec<u8>,
-    conn: D,
+    hub: WatchHub,
     items: Items<N, B>,
 }
 
-impl<N: ?Sized, B, D: Send> Query for LiveViewSubscribe<N, B, D> {
+impl<N: ?Sized, B> Query for LiveViewSubscribe<N, B> {
     type Effect = Read<LiveView<N, B>>;
 }
 
-impl<N, B, C, D> Execute<RedisSource<C>> for LiveViewSubscribe<N, B, D>
+impl<N, B, C> Execute<RedisSource<C>> for LiveViewSubscribe<N, B>
 where
     N: ?Sized,
     B: LiveViewDiff + Send,
     C: ConnectionLike + Clone + Send + Sync,
-    D: ConnectionLike + Send,
 {
-    type Output = Option<(Versioned<B>, LiveViewSubscription<B, D>)>;
+    type Output = Option<(Versioned<B>, LiveViewSubscription<B, C>)>;
     type Error = RedisError;
 
     async fn execute(self, conn: &mut C) -> RedisResult<Self::Output> {
-        let Some(latest) = read_head::<B>(&self.head, conn).await? else {
+        let Some(latest) = read_versioned::<B>(&self.head, conn).await? else {
             return Ok(None);
         };
-        let subscription = LiveViewSubscription::new(self.conn, self.log, latest.version);
+        let subscription =
+            LiveViewSubscription::new(conn.clone(), &self.hub, self.log, latest.version);
         Ok(Some((latest, subscription)))
     }
 }
 
 /// Query from [`LiveView::resume`].
-pub struct LiveViewResume<N: ?Sized, B, D> {
+pub struct LiveViewResume<N: ?Sized, B> {
     log: Vec<u8>,
     version: u64,
-    conn: D,
+    hub: WatchHub,
     items: Items<N, B>,
 }
 
-impl<N: ?Sized, B, D: Send> Query for LiveViewResume<N, B, D> {
+impl<N: ?Sized, B> Query for LiveViewResume<N, B> {
     type Effect = Read<LiveView<N, B>>;
 }
 
-impl<N, B, C, D> Execute<RedisSource<C>> for LiveViewResume<N, B, D>
+impl<N, B, C> Execute<RedisSource<C>> for LiveViewResume<N, B>
 where
     N: ?Sized,
     B: LiveViewDiff,
     C: ConnectionLike + Clone + Send + Sync,
-    D: ConnectionLike + Send,
 {
-    type Output = LiveViewSubscription<B, D>;
+    type Output = LiveViewSubscription<B, C>;
     type Error = RedisError;
 
-    async fn execute(self, _: &mut C) -> RedisResult<LiveViewSubscription<B, D>> {
-        Ok(LiveViewSubscription::new(self.conn, self.log, self.version))
+    async fn execute(self, conn: &mut C) -> RedisResult<LiveViewSubscription<B, C>> {
+        Ok(LiveViewSubscription::new(
+            conn.clone(),
+            &self.hub,
+            self.log,
+            self.version,
+        ))
     }
 }
 
 /// A subscription to a [`LiveView`], from [`LiveView::subscribe`] or
-/// [`LiveView::resume`].
-pub struct LiveViewSubscription<B, D> {
-    cursor: StreamCursor<D>,
+/// [`LiveView::resume`], reading on a clone of the [`RedisSource`]
+/// connection `C`.
+pub struct LiveViewSubscription<B, C> {
+    conn: C,
+    waiter: Waiter,
+    cursor: StreamCursor,
     version: u64,
     bodies: PhantomData<fn() -> B>,
 }
 
-impl<B, D> LiveViewSubscription<B, D> {
-    fn new(conn: D, log: Vec<u8>, version: u64) -> Self {
+impl<B, C> LiveViewSubscription<B, C> {
+    fn new(conn: C, hub: &WatchHub, log: Vec<u8>, version: u64) -> Self {
         Self {
+            conn,
+            waiter: hub.waiter(log.clone()),
             cursor: StreamCursor::new(
-                conn,
                 log,
                 EntryId {
                     ms: version,
@@ -719,13 +694,17 @@ impl<B, D> LiveViewSubscription<B, D> {
     }
 }
 
-impl<B: LiveViewDiff, D: ConnectionLike + Send> LiveViewSubscription<B, D> {
+impl<B: LiveViewDiff, C: ConnectionLike + Send> LiveViewSubscription<B, C> {
     /// The next change, waiting for it. On failure, resume from
     /// [`version`](Self::version).
     pub async fn recv(&mut self) -> RedisResult<LiveViewEvent<B>> {
-        let entry = loop {
-            if let Some(entry) = self.cursor.next(0).await? {
-                break entry;
+        let entry = 'read: loop {
+            // Without a deadline, the turns only end with an entry.
+            let mut turns = self.waiter.turns(None);
+            while turns.next().await {
+                if let Some(entry) = self.cursor.next(&mut self.conn).await? {
+                    break 'read entry;
+                }
             }
         };
         let event = parse_event::<B>(&entry, self.version)?;
@@ -745,7 +724,7 @@ impl<B: LiveViewDiff, D: ConnectionLike + Send> LiveViewSubscription<B, D> {
     }
 }
 
-impl<B, D> Debug for LiveViewSubscription<B, D> {
+impl<B, C> Debug for LiveViewSubscription<B, C> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.debug_struct("LiveViewSubscription")
             .field("log", &String::from_utf8_lossy(&self.cursor.key))

@@ -10,9 +10,9 @@
 //! use futures_util::StreamExt;
 //! use kanau::message::{DeserializeError, MessageDe, MessageSer, SerializeError};
 //! use kanau::processor::Processor;
-//! use redis::aio::MultiplexedConnection;
 //! use wakuwaku_entity::redis::RedisSource;
 //! use wakuwaku_entity::redis::dynamic::stream_buffer::StreamBuffer;
+//! use wakuwaku_entity::redis::watch_hub::WatchHub;
 //! use wakuwaku_entity::{Db, ReadWrite};
 //!
 //! struct Chunk(String);
@@ -30,17 +30,14 @@
 //! const COMPLETIONS: StreamBuffer<u64, Chunk> =
 //!     StreamBuffer::new("completion", Duration::from_secs(120));
 //!
-//! # async fn run(
-//! #     db: Db<RedisSource, ReadWrite>,
-//! #     dedicated: MultiplexedConnection,
-//! # ) -> redis::RedisResult<()> {
+//! # async fn run(db: Db<RedisSource, ReadWrite>, hub: WatchHub) -> redis::RedisResult<()> {
 //! // Producer
 //! db.process(COMPLETIONS.append(&7, Chunk("Hello".into()))).await?;
 //! db.process(COMPLETIONS.append(&7, Chunk(", world".into()))).await?;
 //! db.process(COMPLETIONS.finish(&7)).await?;
 //!
-//! // Subscriber, from the start, on a connection of its own
-//! let subscription = db.process(COMPLETIONS.subscribe(&7, 0, dedicated)).await?;
+//! // Subscriber, from the start, woken by the process's hub
+//! let subscription = db.process(COMPLETIONS.subscribe(&7, 0, &hub)).await?;
 //! let mut chunks = std::pin::pin!(subscription.into_stream());
 //! while let Some(chunk) = chunks.next().await {
 //!     print!("{}", chunk?.0);
@@ -53,6 +50,7 @@ use super::{Entry, EntryId, StreamCursor, gone, parse_range};
 use crate::effect::io::{Read, Write};
 use crate::effect::markers::Entity;
 use crate::query::{Execute, Query};
+use crate::redis::watch_hub::{Waiter, WatchHub};
 use crate::redis::{
     Name, RedisSource, corrupted, deserialize_error, item_key, millis, serialize_error,
 };
@@ -64,6 +62,7 @@ use std::fmt::{self, Debug, Formatter};
 use std::marker::PhantomData;
 use std::sync::LazyLock;
 use std::time::Duration;
+use tokio::time::Instant;
 
 /// Names `N` and bodies `B` of a stream buffer, without owning either.
 type Items<N, B> = PhantomData<fn(&N) -> B>;
@@ -73,8 +72,9 @@ const BODY_FIELD: &[u8] = b"b";
 /// Field of the entry that ends a finished buffer.
 const END_FIELD: &[u8] = b"end";
 
-/// Appends `ARGV[1]` to `KEYS[1]` and restarts its TTL of `ARGV[2]` ms.
-/// Returns the index of the body, or -1 if the buffer is finished.
+/// Appends `ARGV[1]` to `KEYS[1]`, restarts its TTL of `ARGV[2]` ms and
+/// wakes its subscribers. Returns the index of the body, or -1 if the
+/// buffer is finished.
 static APPEND: LazyLock<Script> = LazyLock::new(|| {
     Script::new(
         r"
@@ -83,13 +83,14 @@ if last and last[2][1] == 'end' then return -1 end
 local len = redis.call('XLEN', KEYS[1])
 redis.call('XADD', KEYS[1], string.format('0-%d', len + 1), 'b', ARGV[1])
 redis.call('PEXPIRE', KEYS[1], ARGV[2])
+redis.call('PUBLISH', KEYS[1], '')
 return len
 ",
     )
 });
 
-/// Ends `KEYS[1]` and restarts its TTL of `ARGV[1]` ms. Returns 0 if it was
-/// already finished.
+/// Ends `KEYS[1]`, restarts its TTL of `ARGV[1]` ms and wakes its
+/// subscribers. Returns 0 if it was already finished.
 static FINISH: LazyLock<Script> = LazyLock::new(|| {
     Script::new(
         r"
@@ -98,6 +99,7 @@ if last and last[2][1] == 'end' then return 0 end
 local len = redis.call('XLEN', KEYS[1])
 redis.call('XADD', KEYS[1], string.format('0-%d', len + 1), 'end', '')
 redis.call('PEXPIRE', KEYS[1], ARGV[1])
+redis.call('PUBLISH', KEYS[1], '')
 return 1
 ",
     )
@@ -171,18 +173,17 @@ impl<N: Name + ?Sized, B> StreamBuffer<N, B> {
         }
     }
 
-    /// Follow `name` from index `from` on, using `conn`, a connection used
-    /// for nothing else (see [following changes](super#following-changes)).
+    /// Follow `name` from index `from` on, woken by `hub`.
     ///
     /// The subscription first reads the bodies already appended, then waits
     /// for new ones, and ends after the last body of a finished buffer. It
     /// may start before the buffer exists.
-    pub fn subscribe<D>(&self, name: &N, from: u64, conn: D) -> StreamBufferSubscribe<N, B, D> {
+    pub fn subscribe(&self, name: &N, from: u64, hub: &WatchHub) -> StreamBufferSubscribe<N, B> {
         StreamBufferSubscribe {
             key: self.key(name),
             from,
             ttl: self.ttl,
-            conn,
+            hub: hub.clone(),
             items: PhantomData,
         }
     }
@@ -365,31 +366,32 @@ where
 }
 
 /// Query from [`StreamBuffer::subscribe`].
-pub struct StreamBufferSubscribe<N: ?Sized, B, D> {
+pub struct StreamBufferSubscribe<N: ?Sized, B> {
     key: Vec<u8>,
     from: u64,
     ttl: Duration,
-    conn: D,
+    hub: WatchHub,
     items: Items<N, B>,
 }
 
-impl<N: ?Sized, B, D: Send> Query for StreamBufferSubscribe<N, B, D> {
+impl<N: ?Sized, B> Query for StreamBufferSubscribe<N, B> {
     type Effect = Read<StreamBuffer<N, B>>;
 }
 
-impl<N, B, C, D> Execute<RedisSource<C>> for StreamBufferSubscribe<N, B, D>
+impl<N, B, C> Execute<RedisSource<C>> for StreamBufferSubscribe<N, B>
 where
     N: ?Sized,
     B: MessageDe,
     C: ConnectionLike + Clone + Send + Sync,
-    D: ConnectionLike + Send,
 {
-    type Output = StreamBufferSubscription<B, D>;
+    type Output = StreamBufferSubscription<B, C>;
     type Error = RedisError;
 
-    async fn execute(self, _: &mut C) -> RedisResult<StreamBufferSubscription<B, D>> {
+    async fn execute(self, conn: &mut C) -> RedisResult<StreamBufferSubscription<B, C>> {
         Ok(StreamBufferSubscription {
-            cursor: StreamCursor::new(self.conn, self.key, cursor(self.from)),
+            conn: conn.clone(),
+            waiter: self.hub.waiter(self.key.clone()),
+            cursor: StreamCursor::new(self.key, cursor(self.from)),
             ttl: self.ttl,
             ended: false,
             bodies: PhantomData,
@@ -397,15 +399,18 @@ where
     }
 }
 
-/// A subscription to a [`StreamBuffer`], from [`StreamBuffer::subscribe`].
-pub struct StreamBufferSubscription<B, D> {
-    cursor: StreamCursor<D>,
+/// A subscription to a [`StreamBuffer`], from [`StreamBuffer::subscribe`],
+/// reading on a clone of the [`RedisSource`] connection `C`.
+pub struct StreamBufferSubscription<B, C> {
+    conn: C,
+    waiter: Waiter,
+    cursor: StreamCursor,
     ttl: Duration,
     ended: bool,
     bodies: PhantomData<fn() -> B>,
 }
 
-impl<B: MessageDe, D: ConnectionLike + Send> StreamBufferSubscription<B, D> {
+impl<B: MessageDe, C: ConnectionLike + Send> StreamBufferSubscription<B, C> {
     /// The next body, waiting for it to be appended. `None` after the last
     /// body of a finished buffer.
     ///
@@ -413,12 +418,19 @@ impl<B: MessageDe, D: ConnectionLike + Send> StreamBufferSubscription<B, D> {
     /// longer exists, after which it outputs `None`. Other failures may be
     /// retried.
     pub async fn recv(&mut self) -> RedisResult<Option<B>> {
-        let block = millis(self.ttl);
         while !self.ended {
-            let Some(entry) = self.cursor.next(block).await? else {
+            let mut next = None;
+            let mut turns = self.waiter.turns(Instant::now().checked_add(self.ttl));
+            while turns.next().await {
+                next = self.cursor.next(&mut self.conn).await?;
+                if next.is_some() {
+                    break;
+                }
+            }
+            let Some(entry) = next else {
                 let exists: bool = redis::cmd("EXISTS")
                     .arg(&self.cursor.key)
-                    .query_async(&mut self.cursor.conn)
+                    .query_async(&mut self.conn)
                     .await?;
                 if !exists {
                     self.ended = true;
@@ -449,7 +461,7 @@ impl<B: MessageDe, D: ConnectionLike + Send> StreamBufferSubscription<B, D> {
     }
 }
 
-impl<B, D> Debug for StreamBufferSubscription<B, D> {
+impl<B, C> Debug for StreamBufferSubscription<B, C> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.debug_struct("StreamBufferSubscription")
             .field("key", &String::from_utf8_lossy(&self.cursor.key))

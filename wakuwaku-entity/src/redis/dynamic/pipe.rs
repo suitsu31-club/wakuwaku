@@ -10,9 +10,9 @@
 //! use futures_util::StreamExt;
 //! use kanau::message::{DeserializeError, MessageDe, MessageSer, SerializeError};
 //! use kanau::processor::Processor;
-//! use redis::aio::MultiplexedConnection;
 //! use wakuwaku_entity::redis::RedisSource;
 //! use wakuwaku_entity::redis::dynamic::pipe::Pipe;
+//! use wakuwaku_entity::redis::watch_hub::WatchHub;
 //! use wakuwaku_entity::{Db, ReadWrite};
 //!
 //! struct Frame(String);
@@ -29,16 +29,13 @@
 //!
 //! const TO_CLIENT: Pipe<str, Frame> = Pipe::new("to-client", Duration::from_secs(60));
 //!
-//! # async fn run(
-//! #     db: Db<RedisSource, ReadWrite>,
-//! #     dedicated: MultiplexedConnection,
-//! # ) -> redis::RedisResult<()> {
+//! # async fn run(db: Db<RedisSource, ReadWrite>, hub: WatchHub) -> redis::RedisResult<()> {
 //! // Sender
 //! db.process(TO_CLIENT.send("session-1", Frame("hello".into()))).await?;
 //! db.process(TO_CLIENT.close("session-1")).await?;
 //!
-//! // Receiver, on a connection of its own
-//! let receiver = db.process(TO_CLIENT.receive("session-1", dedicated)).await?;
+//! // Receiver, woken by the process's hub
+//! let receiver = db.process(TO_CLIENT.receive("session-1", &hub)).await?;
 //! let mut frames = std::pin::pin!(receiver.into_stream());
 //! while let Some(frame) = frames.next().await {
 //!     let Frame(text) = frame?;
@@ -52,17 +49,48 @@ use super::gone;
 use crate::effect::io::Write;
 use crate::effect::markers::Entity;
 use crate::query::{Execute, Query};
-use crate::redis::{Name, RedisSource, deserialize_error, millis, serialize_error, tagged_pair};
+use crate::redis::watch_hub::{Waiter, WatchHub};
+use crate::redis::{
+    Name, RedisSource, corrupted, deserialize_error, millis, serialize_error, tagged_pair,
+};
 use futures_util::Stream;
 use kanau::message::{MessageDe, MessageSer};
 use redis::aio::ConnectionLike;
-use redis::{RedisError, RedisResult};
+use redis::{RedisError, RedisResult, Script, Value};
 use std::fmt::{self, Debug, Formatter};
 use std::marker::PhantomData;
+use std::sync::LazyLock;
 use std::time::Duration;
+use tokio::time::Instant;
 
 /// Names `N` and messages `B` of a pipe, without owning either.
 type Items<N, B> = PhantomData<fn(&N) -> B>;
+
+/// Pushes `ARGV[1]` to the list `KEYS[1]`, restarts its TTL of `ARGV[2]`
+/// ms, and wakes the receiver on the channel `ARGV[3]`.
+static PUSH: LazyLock<Script> = LazyLock::new(|| {
+    Script::new(
+        r"
+redis.call('RPUSH', KEYS[1], ARGV[1])
+redis.call('PEXPIRE', KEYS[1], ARGV[2])
+redis.call('PUBLISH', ARGV[3], '')
+",
+    )
+});
+
+/// Pops the first message of `KEYS[1]` and returns it. Without one, pops
+/// the close marker of `KEYS[2]` and returns 0, or returns nil if the pipe
+/// is still open.
+static TAKE: LazyLock<Script> = LazyLock::new(|| {
+    Script::new(
+        r"
+local message = redis.call('LPOP', KEYS[1])
+if message then return message end
+if redis.call('LPOP', KEYS[2]) then return 0 end
+return false
+",
+    )
+});
 
 /// Pipes of messages `B`, named by `N`.
 ///
@@ -105,8 +133,10 @@ impl<N: Name + ?Sized, B> Pipe<N, B> {
     /// Sending after [`close`](Self::close) is allowed but the receiver
     /// never reads it.
     pub fn send(&self, name: &N, body: B) -> PipeSend<N, B> {
+        let (messages, _) = self.keys(name);
         PipeSend {
-            messages: self.keys(name).0,
+            channel: messages.clone(),
+            messages,
             ttl: self.ttl,
             body,
             items: PhantomData,
@@ -116,30 +146,32 @@ impl<N: Name + ?Sized, B> Pipe<N, B> {
     /// Close `name`: its receiver ends after taking the messages sent
     /// before.
     pub fn close(&self, name: &N) -> PipeClose<N, B> {
+        let (channel, close) = self.keys(name);
         PipeClose {
-            close: self.keys(name).1,
+            close,
+            channel,
             ttl: self.ttl,
             items: PhantomData,
         }
     }
 
-    /// Receive the messages of `name` on `conn`, a connection used for
-    /// nothing else (see [following changes](super#following-changes)).
+    /// Receive the messages of `name`, woken by `hub`.
     ///
     /// Taking a message removes it, so a pipe must have one receiver at a
     /// time.
-    pub fn receive<D>(&self, name: &N, conn: D) -> PipeReceive<N, B, D> {
+    pub fn receive(&self, name: &N, hub: &WatchHub) -> PipeReceive<N, B> {
         let (messages, close) = self.keys(name);
         PipeReceive {
             messages,
             close,
             ttl: self.ttl,
-            conn,
+            hub: hub.clone(),
             items: PhantomData,
         }
     }
 
-    /// The message and close keys of `name`.
+    /// The message and close keys of `name`. The message key is also the
+    /// channel that wakes the receiver.
     fn keys(&self, name: &N) -> (Vec<u8>, Vec<u8>) {
         tagged_pair("Pipe", self.namespace, name, b":m", b":c")
     }
@@ -164,30 +196,27 @@ impl<N: ?Sized, B> Debug for Pipe<N, B> {
 
 impl<N: ?Sized, B> Entity for Pipe<N, B> {}
 
-/// Push `value` to the list `key` and restart its TTL, atomically.
+/// Push `value` to the list `key`, restart its TTL, and wake the receiver
+/// on `channel`.
 async fn push(
     key: &[u8],
     value: &[u8],
+    channel: &[u8],
     ttl: Duration,
     conn: &mut (impl ConnectionLike + Send),
 ) -> RedisResult<()> {
-    redis::pipe()
-        .atomic()
-        .cmd("RPUSH")
-        .arg(key)
+    PUSH.key(key)
         .arg(value)
-        .ignore()
-        .cmd("PEXPIRE")
-        .arg(key)
         .arg(millis(ttl))
-        .ignore()
-        .exec_async(conn)
+        .arg(channel)
+        .invoke_async(conn)
         .await
 }
 
 /// Query from [`Pipe::send`].
 pub struct PipeSend<N: ?Sized, B> {
     messages: Vec<u8>,
+    channel: Vec<u8>,
     ttl: Duration,
     body: B,
     items: Items<N, B>,
@@ -208,13 +237,14 @@ where
 
     async fn execute(self, conn: &mut C) -> RedisResult<()> {
         let body = self.body.to_bytes().map_err(serialize_error)?;
-        push(&self.messages, &body, self.ttl, conn).await
+        push(&self.messages, &body, &self.channel, self.ttl, conn).await
     }
 }
 
 /// Query from [`Pipe::close`].
 pub struct PipeClose<N: ?Sized, B> {
     close: Vec<u8>,
+    channel: Vec<u8>,
     ttl: Duration,
     items: Items<N, B>,
 }
@@ -232,37 +262,37 @@ where
     type Error = RedisError;
 
     async fn execute(self, conn: &mut C) -> RedisResult<()> {
-        push(&self.close, b"", self.ttl, conn).await
+        push(&self.close, b"", &self.channel, self.ttl, conn).await
     }
 }
 
 /// Query from [`Pipe::receive`]. Taking messages removes them, so it is a
 /// write.
-pub struct PipeReceive<N: ?Sized, B, D> {
+pub struct PipeReceive<N: ?Sized, B> {
     messages: Vec<u8>,
     close: Vec<u8>,
     ttl: Duration,
-    conn: D,
+    hub: WatchHub,
     items: Items<N, B>,
 }
 
-impl<N: ?Sized, B, D: Send> Query for PipeReceive<N, B, D> {
+impl<N: ?Sized, B> Query for PipeReceive<N, B> {
     type Effect = Write<Pipe<N, B>>;
 }
 
-impl<N, B, C, D> Execute<RedisSource<C>> for PipeReceive<N, B, D>
+impl<N, B, C> Execute<RedisSource<C>> for PipeReceive<N, B>
 where
     N: ?Sized,
     B: MessageDe,
     C: ConnectionLike + Clone + Send + Sync,
-    D: ConnectionLike + Send,
 {
-    type Output = PipeReceiver<B, D>;
+    type Output = PipeReceiver<B, C>;
     type Error = RedisError;
 
-    async fn execute(self, _: &mut C) -> RedisResult<PipeReceiver<B, D>> {
+    async fn execute(self, conn: &mut C) -> RedisResult<PipeReceiver<B, C>> {
         Ok(PipeReceiver {
-            conn: self.conn,
+            conn: conn.clone(),
+            waiter: self.hub.waiter(self.messages.clone()),
             messages: self.messages,
             close: self.close,
             ttl: self.ttl,
@@ -272,9 +302,33 @@ where
     }
 }
 
-/// The receiving end of a [`Pipe`], from [`Pipe::receive`].
-pub struct PipeReceiver<B, D> {
-    conn: D,
+/// What one take found.
+enum Taken {
+    Message(Vec<u8>),
+    Closed,
+    Empty,
+}
+
+/// Take the next message of `messages`, or the close marker of `close`.
+async fn take(
+    messages: &[u8],
+    close: &[u8],
+    conn: &mut (impl ConnectionLike + Send),
+) -> RedisResult<Taken> {
+    let reply: Value = TAKE.key(messages).key(close).invoke_async(conn).await?;
+    match reply {
+        Value::BulkString(message) => Ok(Taken::Message(message)),
+        Value::Int(0) => Ok(Taken::Closed),
+        Value::Nil => Ok(Taken::Empty),
+        _ => Err(corrupted("unexpected pipe take reply")),
+    }
+}
+
+/// The receiving end of a [`Pipe`], from [`Pipe::receive`], reading on a
+/// clone of the [`RedisSource`] connection `C`.
+pub struct PipeReceiver<B, C> {
+    conn: C,
+    waiter: Waiter,
     messages: Vec<u8>,
     close: Vec<u8>,
     ttl: Duration,
@@ -282,7 +336,7 @@ pub struct PipeReceiver<B, D> {
     bodies: PhantomData<fn() -> B>,
 }
 
-impl<B: MessageDe, D: ConnectionLike + Send> PipeReceiver<B, D> {
+impl<B: MessageDe, C: ConnectionLike + Send> PipeReceiver<B, C> {
     /// Take the next message, waiting for it. `None` once the sender closed
     /// the pipe.
     ///
@@ -292,22 +346,20 @@ impl<B: MessageDe, D: ConnectionLike + Send> PipeReceiver<B, D> {
         if self.closed {
             return Ok(None);
         }
-        // Fractional timeouts need Redis 6.
-        let timeout = Duration::from_millis(millis(self.ttl)).as_secs_f64();
-        let popped: Option<(Vec<u8>, Vec<u8>)> = redis::cmd("BLPOP")
-            .arg(&self.messages)
-            .arg(&self.close)
-            .arg(timeout)
-            .query_async(&mut self.conn)
-            .await?;
-        let Some((key, body)) = popped else {
-            return Err(gone("the pipe received nothing for its whole TTL"));
-        };
-        if key == self.close {
-            self.closed = true;
-            return Ok(None);
+        let mut turns = self.waiter.turns(Instant::now().checked_add(self.ttl));
+        while turns.next().await {
+            match take(&self.messages, &self.close, &mut self.conn).await? {
+                Taken::Message(body) => {
+                    return B::from_bytes(&body).map(Some).map_err(deserialize_error);
+                }
+                Taken::Closed => {
+                    self.closed = true;
+                    return Ok(None);
+                }
+                Taken::Empty => {}
+            }
         }
-        B::from_bytes(&body).map(Some).map_err(deserialize_error)
+        Err(gone("the pipe received nothing for its whole TTL"))
     }
 
     /// The messages as a stream, ending when the sender closes the pipe.
@@ -322,7 +374,7 @@ impl<B: MessageDe, D: ConnectionLike + Send> PipeReceiver<B, D> {
     }
 }
 
-impl<B, D> Debug for PipeReceiver<B, D> {
+impl<B, C> Debug for PipeReceiver<B, C> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.debug_struct("PipeReceiver")
             .field("messages", &String::from_utf8_lossy(&self.messages))

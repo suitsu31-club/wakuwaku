@@ -1,5 +1,9 @@
-//! Typed data structures in Redis that can be followed as they change.
+//! Typed data structures in Redis that can be waited on as they change.
 //!
+//! - [`Promise`](promise::Promise): a value completed once, waited on by
+//!   anyone; a distributed oneshot.
+//! - [`Watch`](watch::Watch): the latest version of a value, waited on for
+//!   newer ones; a distributed watch channel.
 //! - [`Pipe`](pipe::Pipe): messages from one sender to one receiver, each
 //!   taken by the receiver once.
 //! - [`LiveView`](live_view::LiveView): a durable body with a linear
@@ -11,38 +15,39 @@
 //! value whose methods build [queries](crate::Query), and is the
 //! [`Entity`](crate::Entity) they read and write.
 //!
-//! # Following changes
+//! # Waiting on changes
 //!
-//! Receiving from a pipe and subscribing to a live view or a stream buffer
-//! output a receiver or subscription that waits with blocking commands
-//! (`BLPOP`, `XREAD BLOCK`) on a connection passed to the query. That
-//! connection must be used for nothing else (not a clone of the
-//! [`RedisSource`](super::RedisSource) connection) and must not time out
-//! responses before the block ends; for a
-//! [`MultiplexedConnection`](redis::aio::MultiplexedConnection):
+//! Waiting on a promise or a watch, receiving from a pipe and subscribing
+//! to a live view or a stream buffer take the process's
+//! [`WatchHub`](super::watch_hub::WatchHub). The wait reads the item with
+//! plain commands on the [`RedisSource`](super::RedisSource) connection, and the
+//! hub wakes it whenever a writer changes the item, so any number of waits
+//! share the hub's single connection:
 //!
 //! ```no_run
-//! use redis::AsyncConnectionConfig;
+//! use wakuwaku_entity::redis::watch_hub::WatchHub;
 //!
 //! # async fn run(client: redis::Client) -> redis::RedisResult<()> {
-//! let config = AsyncConnectionConfig::new().set_response_timeout(None);
-//! let dedicated = client.get_multiplexed_async_connection_with_config(&config).await?;
+//! let hub = WatchHub::connect(client).await?;
 //! # Ok(())
 //! # }
 //! ```
 //!
-//! Each receiver and subscription has an `async fn recv` and an
-//! `into_stream` that turns it into a [`Stream`](futures_util::Stream).
-//! Subscriptions catch up on what they missed before they wait, so they
-//! never skip an item.
+//! Receivers and subscriptions have an `async fn recv` and an
+//! `into_stream` that turns them into a [`Stream`](futures_util::Stream).
+//! Waits read what they missed before they sleep, so they never skip an
+//! item.
 //!
-//! See the [Redis guide](https://www.wakuwaku.rs/en/docs/data/redis#following-changes-dedicated-connections).
+//! See the [Redis guide](https://www.wakuwaku.rs/en/docs/data/redis#following-changes-the-watch-hub).
 
 pub mod live_view;
 pub mod pipe;
+pub mod promise;
 pub mod stream_buffer;
+pub mod watch;
 
-use super::corrupted;
+use super::{corrupted, deserialize_error};
+use kanau::message::MessageDe;
 use redis::aio::ConnectionLike;
 use redis::{ErrorKind, RedisError, RedisResult, Value};
 use std::collections::VecDeque;
@@ -54,7 +59,7 @@ fn gone(detail: &'static str) -> RedisError {
     RedisError::from((ErrorKind::Client, "structure gone", detail.to_owned()))
 }
 
-/// Entries read by one `XREAD`.
+/// Entries read by one `XRANGE` of a [`StreamCursor`].
 const READ_BATCH: usize = 128;
 
 /// ID of a stream entry. Both structures write explicit IDs, so each part
@@ -77,6 +82,17 @@ impl EntryId {
                 })
             });
         parsed.ok_or_else(|| corrupted("malformed stream entry ID"))
+    }
+
+    /// The smallest ID after this one, `None` after the largest.
+    fn successor(self) -> Option<Self> {
+        match self.seq.checked_add(1) {
+            Some(seq) => Some(Self { ms: self.ms, seq }),
+            None => Some(Self {
+                ms: self.ms.checked_add(1)?,
+                seq: 0,
+            }),
+        }
     }
 }
 
@@ -135,70 +151,83 @@ fn parse_range(value: Value) -> RedisResult<Vec<Entry>> {
     }
 }
 
-/// Reply of `XREAD` on one stream, `None` if it timed out.
-///
-/// RESP2 replies `[[key, entries]]`, RESP3 `{key: entries}`.
-fn parse_read(value: Value) -> RedisResult<Option<Vec<Entry>>> {
-    let entries = match value {
-        Value::Nil => return Ok(None),
-        Value::Array(streams) => match streams.into_iter().next() {
-            Some(Value::Array(stream)) => stream.into_iter().nth(1),
-            Some(_) => return Err(corrupted("XREAD stream is not a key and its entries")),
-            None => None,
-        },
-        Value::Map(streams) => streams.into_iter().next().map(|(_, entries)| entries),
-        _ => return Err(corrupted("XREAD reply is neither nil, an array nor a map")),
-    };
-    entries.map_or(Ok(Some(Vec::new())), |entries| {
-        parse_range(entries).map(Some)
-    })
-}
-
-/// Reads the entries of one stream after a cursor, in batches, on a
-/// dedicated connection.
-struct StreamCursor<D> {
-    conn: D,
+/// Reads the entries of one stream after a cursor, in batches.
+struct StreamCursor {
     key: Vec<u8>,
     after: EntryId,
     pending: VecDeque<Entry>,
 }
 
-impl<D> StreamCursor<D> {
-    fn new(conn: D, key: Vec<u8>, after: EntryId) -> Self {
+impl StreamCursor {
+    fn new(key: Vec<u8>, after: EntryId) -> Self {
         Self {
-            conn,
             key,
             after,
             pending: VecDeque::new(),
         }
     }
-}
 
-impl<D: ConnectionLike + Send> StreamCursor<D> {
-    /// The next entry, waiting up to `block_ms` (0: forever) for one to be
-    /// added. `None` if the wait timed out.
-    async fn next(&mut self, block_ms: u64) -> RedisResult<Option<Entry>> {
+    /// The next entry, `None` if the stream has none after the cursor yet.
+    async fn next(
+        &mut self,
+        conn: &mut (impl ConnectionLike + Send),
+    ) -> RedisResult<Option<Entry>> {
         if let Some(entry) = self.pending.pop_front() {
             return Ok(Some(entry));
         }
-        let reply: Value = redis::cmd("XREAD")
-            .arg("COUNT")
-            .arg(READ_BATCH)
-            .arg("BLOCK")
-            .arg(block_ms)
-            .arg("STREAMS")
-            .arg(&self.key)
-            .arg(self.after.to_string())
-            .query_async(&mut self.conn)
-            .await?;
-        let Some(entries) = parse_read(reply)? else {
+        let Some(start) = self.after.successor() else {
             return Ok(None);
         };
+        let reply = redis::cmd("XRANGE")
+            .arg(&self.key)
+            .arg(start.to_string())
+            .arg("+")
+            .arg("COUNT")
+            .arg(READ_BATCH)
+            .query_async(conn)
+            .await?;
+        let entries = parse_range(reply)?;
         if let Some(last) = entries.last() {
             self.after = last.id;
         }
         self.pending = entries.into();
         Ok(self.pending.pop_front())
+    }
+}
+
+/// Field of a hash holding the version of a [`Versioned`] body.
+const VERSION_FIELD: &str = "v";
+/// Field of a hash holding the body of a [`Versioned`] body.
+const BODY_FIELD: &str = "b";
+
+/// A body at a version.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Versioned<B> {
+    /// The version, from 1.
+    pub version: u64,
+    /// The body at that version.
+    pub body: B,
+}
+
+/// Read the version and body stored in the hash `key`, `None` if it is
+/// absent.
+async fn read_versioned<B: MessageDe>(
+    key: &[u8],
+    conn: &mut (impl ConnectionLike + Send),
+) -> RedisResult<Option<Versioned<B>>> {
+    let (version, body): (Option<u64>, Option<Vec<u8>>) = redis::cmd("HMGET")
+        .arg(key)
+        .arg(VERSION_FIELD)
+        .arg(BODY_FIELD)
+        .query_async(conn)
+        .await?;
+    match (version, body) {
+        (Some(version), Some(body)) => Ok(Some(Versioned {
+            version,
+            body: B::from_bytes(&body).map_err(deserialize_error)?,
+        })),
+        (None, None) => Ok(None),
+        _ => Err(corrupted("versioned body lacks its version or body")),
     }
 }
 
@@ -218,26 +247,20 @@ mod tests {
     }
 
     #[test]
-    fn xread_replies_parse_in_both_protocols() {
-        let entries = || {
-            Value::Array(vec![
-                entry("3-0", &["d", "x"]),
-                entry("0-12", &["b", "", "e", "y"]),
-            ])
-        };
-        let resp2 = Value::Array(vec![Value::Array(vec![bytes("key"), entries()])]);
-        let resp3 = Value::Map(vec![(bytes("key"), entries())]);
-        for reply in [resp2, resp3] {
-            let parsed = parse_read(reply).ok().flatten().unwrap_or_default();
-            let ids: Vec<_> = parsed.iter().map(|entry| entry.id).collect();
-            assert_eq!(ids, [EntryId { ms: 3, seq: 0 }, EntryId { ms: 0, seq: 12 }]);
-            assert_eq!(parsed[0].get(b"d"), Some(&b"x"[..]));
-            assert_eq!(parsed[0].get(b"x"), None);
-            assert_eq!(parsed[1].get(b"b"), Some(&b""[..]));
-            assert_eq!(parsed[1].get(b"e"), Some(&b"y"[..]));
-            assert_eq!(parsed[1].get(b""), None);
-        }
-        assert_eq!(parse_read(Value::Nil).ok(), Some(None));
+    fn xrange_replies_parse() {
+        let reply = Value::Array(vec![
+            entry("3-0", &["d", "x"]),
+            entry("0-12", &["b", "", "e", "y"]),
+        ]);
+        let parsed = parse_range(reply).unwrap_or_default();
+        let ids: Vec<_> = parsed.iter().map(|entry| entry.id).collect();
+        assert_eq!(ids, [EntryId { ms: 3, seq: 0 }, EntryId { ms: 0, seq: 12 }]);
+        assert_eq!(parsed[0].get(b"d"), Some(&b"x"[..]));
+        assert_eq!(parsed[0].get(b"x"), None);
+        assert_eq!(parsed[1].get(b"b"), Some(&b""[..]));
+        assert_eq!(parsed[1].get(b"e"), Some(&b"y"[..]));
+        assert_eq!(parsed[1].get(b""), None);
+        assert!(parse_range(Value::Nil).is_ok_and(|entries| entries.is_empty()));
     }
 
     #[test]
@@ -245,5 +268,13 @@ mod tests {
         assert!(parse_entry(entry("1-0", &["a", "1", "b"])).is_err());
         assert!(parse_entry(entry("1", &["a", "1"])).is_err());
         assert!(parse_entry(entry("1-x", &["a", "1"])).is_err());
+    }
+
+    #[test]
+    fn successor_carries_into_the_milliseconds() {
+        let id = |ms, seq| EntryId { ms, seq };
+        assert_eq!(id(4, 0).successor(), Some(id(4, 1)));
+        assert_eq!(id(4, u64::MAX).successor(), Some(id(5, 0)));
+        assert_eq!(id(u64::MAX, u64::MAX).successor(), None);
     }
 }
