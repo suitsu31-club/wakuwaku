@@ -204,6 +204,7 @@ pub enum TxFinalState<R> {
 }
 
 /// Why a transaction didn't end as its flow planned.
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum TxError {
     /// No connection, or `BEGIN` failed. The flow never ran.

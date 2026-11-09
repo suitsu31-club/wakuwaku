@@ -130,6 +130,7 @@ pub enum Filter<F> {
 }
 
 /// Why a [`Filter`] can't be rendered.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum FilterError {
     /// An [`And`](Filter::And) or [`Or`](Filter::Or) without conditions.
