@@ -3,7 +3,7 @@
 //! [`rebuild()`] fills a fresh copy of the index from a [`Scan`] of the
 //! source, then swaps it with the live index in one step.
 //!
-//! See the [sync guide](https://www.wakuwaku.rs/en/docs/data/meilisearch/sync#rebuilding-an-index).
+//! See the [rebuild guide](https://www.wakuwaku.rs/en/docs/data/meilisearch/rebuild).
 
 use crate::effect::markers::CanWrite;
 use crate::meilisearch::sync::{Key, Scan, SyncError};

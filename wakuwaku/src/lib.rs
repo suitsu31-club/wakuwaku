@@ -9,7 +9,7 @@
 //! How components fit together is checked by the compiler; what each one
 //! does is checked by unit tests, since every component is a plain value
 //! implementing [`kanau::processor::Processor`] (or a trait built on it).
-//! See [proof-driven programming](https://www.wakuwaku.rs/en/docs/core/proof-driven)
+//! See [proof-driven programming](https://www.wakuwaku.rs/en/docs/concepts/proof-driven)
 //! and the [guide](https://www.wakuwaku.rs/en/docs).
 //!
 //! # What this crate provides

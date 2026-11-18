@@ -13,7 +13,7 @@
 //! already visible to the read. A wake-up carries nothing; extra ones only
 //! cost a read, and after a reconnect every wait reads again.
 //!
-//! See the [Redis guide](https://www.wakuwaku.rs/en/docs/data/redis#following-changes-the-watch-hub).
+//! See the [Redis guide](https://www.wakuwaku.rs/en/docs/data/redis#watch-hub).
 
 use futures_util::StreamExt;
 use redis::aio::{PubSub, PubSubSink};

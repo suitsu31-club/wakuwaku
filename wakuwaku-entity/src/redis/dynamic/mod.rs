@@ -38,7 +38,7 @@
 //! Waits read what they missed before they sleep, so they never skip an
 //! item.
 //!
-//! See the [Redis guide](https://www.wakuwaku.rs/en/docs/data/redis#following-changes-the-watch-hub).
+//! See the [Redis guide](https://www.wakuwaku.rs/en/docs/data/redis#watch-hub).
 
 pub mod live_view;
 pub mod pipe;

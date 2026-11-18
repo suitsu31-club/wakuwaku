@@ -32,7 +32,7 @@
 //! let _: &String = services.provide::<String, _>();
 //! ```
 //!
-//! See the [service builder guide](https://www.wakuwaku.rs/en/docs/core/service-builder).
+//! See the [service builder guide](https://www.wakuwaku.rs/en/docs/services/service-builder).
 
 use crate::services::ServiceCreation;
 use crate::services::cron_job::{CronJob, CronRegisterCenter, CronRegisterCenterBuilder};

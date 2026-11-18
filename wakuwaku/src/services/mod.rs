@@ -12,7 +12,7 @@
 //! | gRPC server   | `grpc_service::RoutableService`| `grpc_service`    | `grpc`  |
 //! | Event handler | `wakuwaku_iggy::EventHandler`  | `iggy_consumer`   | `iggy`  |
 //!
-//! See the [service builder guide](https://www.wakuwaku.rs/en/docs/core/service-builder).
+//! See the [service builder guide](https://www.wakuwaku.rs/en/docs/services/service-builder).
 
 pub mod builder;
 pub mod cron_job;
